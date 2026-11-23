@@ -64,10 +64,12 @@ creates to `keys/` and the addresses of the market to `state/perc.json`; neither
 
 ## Devnet results
 
-Two manipulation runs against a 2,000 USDC pool, with a trader long 200 contracts at 8x: the pool moved 124%, the
-perp 21% and 33%, and the attacker came out 162.66 and 294.60 USDC ahead after the pool's fees. The engine's price cap
-slowed the perp; the open interest the market allowed against that pool was still far too large. Details, transactions
-and what changes before mainnet: [docs/devnet-runs.md](docs/devnet-runs.md).
+Four manipulation runs against a 2,000 USDC pool, each pumping it 124% with 1,000 USDC. With only the engine's price
+cap (runs 1 and 2, a trader long 200 contracts) the attacker came out 162.66 and 294.60 USDC ahead. With the house's
+defenses (backing, an open interest cap at 5% of the pool's depth, a gap fee, a 30-minute average) the trader could
+open 24 contracts: with nobody trading against the pump the attacker still came out 114.44 USDC ahead (run 3), and with
+holders selling into it he lost 237.16 USDC (run 4). The holders' pace is an assumption. Details, transactions and what
+is left before mainnet: [docs/devnet-runs.md](docs/devnet-runs.md).
 
 ## License
 
