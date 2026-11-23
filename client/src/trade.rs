@@ -16,9 +16,15 @@ const POS_SCALE: f64 = 1_000_000.0;
 /// The trader trades `contracts` against the house (positive: the trader goes long) at the effective mark, both
 /// signing (TradeNoCpi). Both portfolios are cranked to this slot in the same transaction: a trade that increases
 /// risk is refused while the asset's losses are not accrued to the current slot.
+///
+/// The engine books the position at its effective mark; the execution price only sizes the trade's notional (fees
+/// and limits). The stored mark can lag the pushed one until a crank moves it, so a crank of its own runs first and
+/// the price is read after it.
 pub fn trade(c: &Ctx, st: &Value, contracts: f64) -> Result<()> {
     let market = pk(st, "market")?;
     let (tp, hp) = (pk(st, "traderPortfolio")?, pk(st, "housePortfolio")?);
+    let slot = c.rpc.get_slot()?;
+    c.send(vec![crank_ix(c, &c.house.pubkey(), market, tp, slot), crank_ix(c, &c.house.pubkey(), market, hp, slot)], &[&c.house])?;
     let (_, group) = eng(state::read_market(&c.data(&market)?))?;
     let asset = &group.assets[0];
     let (td, hd) = (c.data(&tp)?, c.data(&hp)?);
