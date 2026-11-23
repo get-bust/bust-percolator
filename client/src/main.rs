@@ -7,8 +7,9 @@
 //!   perc setup <mark_e6>            open the market, set its first mark, open and fund both portfolios
 //!   perc show                       the mark, open interest and both portfolios
 //!   perc deposit <usdc>             the trader deposits more collateral
+//!   perc back <usdc>                the house backs each side of the asset with <usdc>
 //!   perc push <mark_e6>             push one authority mark
-//!   perc crank <trader|house>       permissionless crank of one portfolio
+//!   perc crank <trader|house|key>   permissionless crank of one portfolio (key: a portfolio in the state file)
 //!   perc trade <contracts>          the trader against the house at the effective mark (positive: long)
 //!   perc withdraw <usdc>            the trader withdraws collateral
 //!   perc convert <usdc>             the trader converts released profit into capital
@@ -48,6 +49,7 @@ fn main() -> Result<()> {
             market::deposit(&c, &read_state()?, false, usdc(&arg(1)?)?)?;
             market::show(&c)
         }
+        Some("back") => market::back(&c, &read_state()?, usdc(&arg(1)?)?),
         Some("push") => {
             println!("{}", mark::push(&c, &read_state()?, arg(1)?.parse()?)?);
             market::show(&c)

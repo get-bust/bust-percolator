@@ -45,9 +45,14 @@ pub fn crank_ix(c: &Ctx, signer: &Pubkey, market: Pubkey, portfolio: Pubkey, slo
     )
 }
 
-/// Cranks the trader's or the house's portfolio; anyone may, the house pays here.
+/// Cranks a portfolio: `trader`, `house`, or any portfolio key in the state file (an earlier trader's, kept under its
+/// tag). Anyone may crank; the house pays here. A crank also expires a lapsed backing bucket the portfolio refers to.
 pub fn crank(c: &Ctx, st: &Value, who: &str) -> Result<String> {
-    let portfolio = if who == "house" { pk(st, "housePortfolio")? } else { pk(st, "traderPortfolio")? };
+    let portfolio = match who {
+        "house" => pk(st, "housePortfolio")?,
+        "trader" => pk(st, "traderPortfolio")?,
+        key => pk(st, key)?,
+    };
     let ix = crank_ix(c, &c.house.pubkey(), pk(st, "market")?, portfolio, c.rpc.get_slot()?);
     c.send(vec![ix], &[&c.house])
 }

@@ -48,7 +48,9 @@ pub fn setup(c: &Ctx, initial_mark: u64) -> Result<()> {
         println!("market account and vault: {sig}");
 
         // A memecoin profile: 10% initial margin (10x), 5% maintenance, the mark moves at most 10 bps per slot and
-        // at most 20 slots are accrued per crank, so one crank moves it at most 2%.
+        // at most 20 slots are accrued per crank, so one crank moves it at most 2%. A loser's payment backs the
+        // winners' claims for the freshness horizon, the largest of h_max, the accrual window and the bankrupt-close
+        // lifetime: 216,000 slots (about a day) gives a winner a day to convert its profit.
         let init = Ix::InitMarket {
             max_portfolio_assets: 1,
             h_min: 0,
@@ -69,7 +71,7 @@ pub fn setup(c: &Ctx, initial_mark: u64) -> Result<()> {
             min_funding_lifetime_slots: 20,
             max_account_b_settlement_chunks: 1,
             max_bankrupt_close_chunks: 1,
-            max_bankrupt_close_lifetime_slots: 1_000,
+            max_bankrupt_close_lifetime_slots: 216_000,
             maintenance_fee_per_slot: 0,
         };
         let sig = c.send(
@@ -219,4 +221,50 @@ pub fn show(c: &Ctx) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Backing lasts this many slots from a top-up (about nine days at 400 ms).
+const BACKING_SLOTS: u64 = 2_000_000;
+
+/// The house backs both sides of asset 0 with `amount` collateral atoms each: domain 1 pays the asset's long winners,
+/// domain 0 its short winners. A winner is paid only from the backing of its own domain, and only a position opened
+/// while that backing was in place holds a claim on it; profit with no claim stays junior and cannot be withdrawn.
+pub fn back(c: &Ctx, st: &Value, amount: u128) -> Result<()> {
+    let market = pk(st, "market")?;
+    let house_tokens = spl_associated_token_account::get_associated_token_address(&c.house.pubkey(), &pk(st, "mint")?);
+    for domain in [0u16, 1u16] {
+        let data = c.data(&market)?;
+        let (_, group) = eng(state::read_market(&data))?;
+        let seq = eng(state::read_asset_control_sequences(&data, 0))?;
+        let profile = eng(state::read_asset_oracle_profile(&data, 0))?;
+        let (fee_bps, insurance_share_bps) = if domain == 0 {
+            (profile.backing_trade_fee_bps_long, profile.backing_trade_fee_insurance_share_bps_long)
+        } else {
+            (profile.backing_trade_fee_bps_short, profile.backing_trade_fee_insurance_share_bps_short)
+        };
+        let sig = c.send(
+            vec![c.prog(
+                Ix::TopUpBackingBucket {
+                    domain,
+                    market_id: group.assets[0].market_id,
+                    intent_id: seq.backing_top_up + 1,
+                    authority_epoch: seq.authority_epoch,
+                    backing_fee_bps: fee_bps,
+                    insurance_share_bps,
+                    amount,
+                    expiry_slot: c.rpc.get_slot()?.max(group.current_slot) + BACKING_SLOTS,
+                },
+                vec![
+                    AccountMeta::new(c.house.pubkey(), true),
+                    AccountMeta::new(market, false),
+                    AccountMeta::new(house_tokens, false),
+                    AccountMeta::new(pk(st, "vault")?, false),
+                    AccountMeta::new_readonly(spl_token::ID, false),
+                ],
+            )],
+            &[&c.house],
+        )?;
+        println!("backing domain {domain}: {} ({sig})", amount as f64 / 1e6);
+    }
+    show(c)
 }
