@@ -9,6 +9,9 @@
 //!   perc deposit <usdc>             the trader deposits more collateral
 //!   perc push <mark_e6>             push one authority mark
 //!   perc crank <trader|house>       permissionless crank of one portfolio
+//!   perc trade <contracts>          the trader against the house at the effective mark (positive: long)
+//!   perc withdraw <usdc>            the trader withdraws collateral
+//!   perc convert <usdc>             the trader converts released profit into capital
 //!
 //! Configuration: devnet.json (RPC, program id, collateral mint). Keys: HOUSE_KEYPAIR (default
 //! ~/.config/solana/id.json), MINT_AUTHORITY_KEYPAIR (the collateral mint's authority, default the house), and
@@ -17,6 +20,7 @@
 mod ctx;
 mod market;
 mod mark;
+mod trade;
 
 use anyhow::{anyhow, bail, Result};
 use ctx::{read_state, Ctx};
@@ -45,6 +49,9 @@ fn main() -> Result<()> {
             println!("{}", mark::crank(&c, &read_state()?, &arg(1)?)?);
             market::show(&c)
         }
+        Some("trade") => trade::trade(&c, &read_state()?, arg(1)?.parse()?),
+        Some("withdraw") => trade::withdraw(&c, &read_state()?, usdc(&arg(1)?)?),
+        Some("convert") => trade::convert(&c, &read_state()?, usdc(&arg(1)?)?),
         _ => bail!("unknown command; see the list at the top of client/src/main.rs"),
     }
 }

@@ -31,6 +31,27 @@ shasum -a 256 deployed.so target/deploy/percolator_prog.so
 The script builds a clean copy of the submodule's commit under `target/program`, so the submodule itself stays
 unchanged.
 
+## Run the client
+
+`client/` is a command-line client for one market with one asset, a perp on a Pump coin. The asset is priced by an
+authority-pushed mark (Percolator's AuthMark mode) and collateralised in a devnet test USDC; one contract is
+1,000,000 coins and marks are collateral atoms per contract. The house is the market authority, the oracle authority
+and the trader's counterparty.
+
+```sh
+export HOUSE_KEYPAIR=~/.config/solana/id.json        # pays, and signs as the house
+export MINT_AUTHORITY_KEYPAIR=...                     # mint authority of the collateral in devnet.json
+cd client && cargo build --release && cd ..
+client/target/release/perc setup 4000000              # first mark: 4 USDC per contract
+client/target/release/perc trade 200                  # the trader goes long 200 contracts
+client/target/release/perc push 4200000               # a new mark
+client/target/release/perc crank trader               # move the effective price toward it
+client/target/release/perc show
+```
+
+The list of commands is at the top of [`client/src/main.rs`](client/src/main.rs). The client writes the keypairs it
+creates to `keys/` and the addresses of the market to `state/perc.json`; neither is committed.
+
 ## License
 
 The code in this repository is licensed under the [Business Source License 1.1](LICENSE). Percolator is licensed
