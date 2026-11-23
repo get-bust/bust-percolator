@@ -1,0 +1,5 @@
+{
+  "rpc": "https://api.devnet.solana.com",
+  "program": "7R1ED7LLqoP468afxJfq9HJ5ikqT4z73C6AYoE7evdPo",
+  "collateralMint": "9zNHXmCYFY2zv8VJf1sCK7sdLnLMmyAzjCXxpqQYjkbr"
+}
