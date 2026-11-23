@@ -7,6 +7,8 @@
 //!   perc setup <mark_e6>            open the market, set its first mark, open and fund both portfolios
 //!   perc show                       the mark, open interest and both portfolios
 //!   perc deposit <usdc>             the trader deposits more collateral
+//!   perc push <mark_e6>             push one authority mark
+//!   perc crank <trader|house>       permissionless crank of one portfolio
 //!
 //! Configuration: devnet.json (RPC, program id, collateral mint). Keys: HOUSE_KEYPAIR (default
 //! ~/.config/solana/id.json), MINT_AUTHORITY_KEYPAIR (the collateral mint's authority, default the house), and
@@ -14,6 +16,7 @@
 
 mod ctx;
 mod market;
+mod mark;
 
 use anyhow::{anyhow, bail, Result};
 use ctx::{read_state, Ctx};
@@ -32,6 +35,14 @@ fn main() -> Result<()> {
         Some("show") => market::show(&c),
         Some("deposit") => {
             market::deposit(&c, &read_state()?, false, usdc(&arg(1)?)?)?;
+            market::show(&c)
+        }
+        Some("push") => {
+            println!("{}", mark::push(&c, &read_state()?, arg(1)?.parse()?)?);
+            market::show(&c)
+        }
+        Some("crank") => {
+            println!("{}", mark::crank(&c, &read_state()?, &arg(1)?)?);
             market::show(&c)
         }
         _ => bail!("unknown command; see the list at the top of client/src/main.rs"),
