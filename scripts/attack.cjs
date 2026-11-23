@@ -1,15 +1,25 @@
 // A recorded manipulation run: the trader holds a long while the house pumps the pool it is marked to.
-//   node scripts/attack.cjs <tag> [pump_usdc=1000] [hold_secs=120] [contracts=200]
-// Starts `perc record`, waits until the mark sits on the pool, then: opens the long, pumps the pool, holds it while the
-// recorder cranks every tick, closes the long and sells the bought coins back, and records 20 s more.
+//   node scripts/attack.cjs <tag> [--pump 1000] [--hold 120] [--contracts 200] [--window 60] [--holders <half_life_s>]
+// Starts `perc record` (pushing the pool's average over --window seconds), and the holders when --holders is given,
+// waits until the mark sits on the pool, then: opens the long, pumps the pool with --pump USDC, holds it --hold
+// seconds while the recorder cranks every tick, closes the long and sells the bought coins back, and records 20 s more.
 // Ticks go to state/run-<tag>.jsonl, events to state/run-<tag>-events.json. Start from a fresh trader (perc newtrader).
 const { spawn, execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { ROOT, statePath } = require("./common.cjs");
 
-const [tag, pump = "1000", hold = "120", contracts = "200"] = process.argv.slice(2);
-if (!tag) throw new Error("usage: attack.cjs <tag> [pump_usdc] [hold_secs] [contracts]");
+const [tag, ...flags] = process.argv.slice(2);
+if (!tag || tag.startsWith("--")) throw new Error("usage: attack.cjs <tag> [--pump usdc] [--hold s] [--contracts n] [--window s] [--holders half_life_s]");
+const opt = (name, fallback) => {
+  const i = flags.indexOf(`--${name}`);
+  return i >= 0 ? flags[i + 1] : fallback;
+};
+const pump = opt("pump", "1000");
+const hold = opt("hold", "120");
+const contracts = opt("contracts", "200");
+const window = opt("window", "60");
+const holdersHalfLife = opt("holders", null);
 const PERC = path.join(ROOT, "client/target/release/perc");
 const POOL = path.join(__dirname, "pool.cjs");
 const TICKS = statePath(`run-${tag}.jsonl`);
@@ -33,8 +43,11 @@ const poolBase = () => Number(/base: (\d+)/.exec(run("node", [POOL, "price"]))[1
 (async () => {
   fs.mkdirSync(path.dirname(TICKS), { recursive: true });
   fs.writeFileSync(TICKS, "");
-  const recorder = spawn(PERC, ["record", "60", "900"], { cwd: ROOT, stdio: ["ignore", fs.openSync(TICKS, "a"), "inherit"] });
-  mark("recorder", { pump: Number(pump), hold: Number(hold), contracts: Number(contracts) });
+  const recorder = spawn(PERC, ["record", window, "3600"], { cwd: ROOT, stdio: ["ignore", fs.openSync(TICKS, "a"), "inherit"] });
+  const holders = holdersHalfLife
+    ? spawn("node", [path.join(__dirname, "holders.cjs"), tag, holdersHalfLife, "200", window], { cwd: ROOT, stdio: ["ignore", fs.openSync(statePath(`holders-${tag}.log`), "a"), "inherit"] })
+    : null;
+  mark("recorder", { pump: Number(pump), hold: Number(hold), contracts: Number(contracts), window: Number(window), holders: holdersHalfLife && Number(holdersHalfLife) });
 
   // the target and the effective mark within 0.3% of the pool for 10 s
   let since = 0;
@@ -50,7 +63,7 @@ const poolBase = () => Number(/base: (\d+)/.exec(run("node", [POOL, "price"]))[1
   await sleep(10_000);
 
   const open = run(PERC, ["trade", contracts]);
-  mark("open", { line: open.split("\n")[0] });
+  mark("open", { out: open.trim().split("\n") });
   await sleep(15_000);
 
   const before = poolBase();
@@ -60,12 +73,13 @@ const poolBase = () => Number(/base: (\d+)/.exec(run("node", [POOL, "price"]))[1
   await sleep(Number(hold) * 1000);
 
   const close = run(PERC, ["trade", `-${contracts}`]);
-  mark("close", { line: close.split("\n")[0], after: close.split("\n").slice(1, 4) });
+  mark("close", { out: close.trim().split("\n") });
   const sell = run("node", [POOL, "sell", String(bought)]);
   mark("dump", { out: sell.trim().split("\n") });
 
   await sleep(20_000);
   recorder.kill();
+  holders?.kill();
   mark("done");
 })().catch((e) => {
   console.error(e);
