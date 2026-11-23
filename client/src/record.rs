@@ -21,7 +21,7 @@ pub fn record(c: &Ctx, st: &Value, window: u64, secs: u64) -> Result<()> {
     let pool = read_pool()?;
     let market = pk(st, "market")?;
     let (tp, hp) = (pk(st, "traderPortfolio")?, pk(st, "housePortfolio")?);
-    let mut twap = Twap::new(window);
+    let mut twap = Twap::new(window, pool_spot(c, &pool)?);
     let mut last = Instant::now() - Duration::from_secs(60);
     let start = Instant::now();
     while start.elapsed().as_secs() < secs {

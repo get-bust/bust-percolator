@@ -69,24 +69,43 @@ pub fn read_pool() -> Result<Value> {
     Ok(serde_json::from_str(&std::fs::read_to_string(crate::ctx::root().join("state/pool.json"))?)?)
 }
 
-/// Time-weighted average of the samples within `window` of the newest.
+/// Time-weighted average price over the last `window`. Before its first sample it holds `seed`, the price when it
+/// started, so a fresh pusher averages over a full window instead of over the few samples it has taken.
 pub struct Twap {
     window: Duration,
+    seed: f64,
     samples: VecDeque<(Instant, f64)>,
 }
 
 impl Twap {
-    pub fn new(window_secs: u64) -> Self {
-        Self { window: Duration::from_secs(window_secs), samples: Default::default() }
+    pub fn new(window_secs: u64, seed: f64) -> Self {
+        Self { window: Duration::from_secs(window_secs), seed, samples: VecDeque::new() }
     }
 
+    /// Adds a sample taken now and returns the average over the window ending now.
     pub fn add(&mut self, price: f64) -> f64 {
         let now = Instant::now();
         self.samples.push_back((now, price));
-        while self.samples.front().is_some_and(|(t, _)| now.duration_since(*t) > self.window) {
-            self.samples.pop_front();
+        let start = now.checked_sub(self.window).unwrap_or(now);
+        // keep one sample at or before the window's start: it is the price at the start
+        while self.samples.len() > 1 && self.samples[1].0 <= start {
+            let (_, p) = self.samples.pop_front().unwrap();
+            self.seed = p;
         }
-        self.samples.iter().map(|(_, p)| p).sum::<f64>() / self.samples.len() as f64
+        let mut at = start;
+        let mut value = self.seed;
+        let mut sum = 0.0;
+        for &(t, p) in &self.samples {
+            if t <= start {
+                value = p;
+                continue;
+            }
+            sum += value * t.duration_since(at).as_secs_f64();
+            at = t;
+            value = p;
+        }
+        sum += value * now.duration_since(at).as_secs_f64();
+        sum / self.window.as_secs_f64()
     }
 
     pub fn len(&self) -> usize {
@@ -97,7 +116,7 @@ impl Twap {
 /// Follows the pool: samples it every 2 s and pushes its time-weighted average over `window` seconds every 4 s.
 pub fn pusher(c: &Ctx, st: &Value, window: u64) -> Result<()> {
     let pool = read_pool()?;
-    let mut twap = Twap::new(window);
+    let mut twap = Twap::new(window, pool_spot(c, &pool)?);
     let mut last = Instant::now() - Duration::from_secs(60);
     loop {
         let spot = pool_spot(c, &pool)?;
