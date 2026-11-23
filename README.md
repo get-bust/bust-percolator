@@ -52,6 +52,23 @@ client/target/release/perc show
 The list of commands is at the top of [`client/src/main.rs`](client/src/main.rs). The client writes the keypairs it
 creates to `keys/` and the addresses of the market to `state/perc.json`; neither is committed.
 
+## Scripts
+
+`scripts/` holds the devnet tooling around the client (Node 20+, `pnpm install`):
+
+| Script | Does |
+|---|---|
+| `pool.cjs` | Mints a test coin and opens its PumpSwap pool against the collateral; `buy` and `sell` move its price |
+| `attack.cjs` | A recorded manipulation run: opens a long, pumps the pool, holds it, closes and sells back |
+| `export-run.cjs` | A recorded run as one JSON file for charts |
+
+## Devnet results
+
+Two manipulation runs against a 2,000 USDC pool, with a trader long 200 contracts at 8x: the pool moved 124%, the
+perp 21% and 33%, and the attacker came out 162.66 and 294.60 USDC ahead after the pool's fees. The engine's price cap
+slowed the perp; the open interest the market allowed against that pool was still far too large. Details, transactions
+and what changes before mainnet: [docs/devnet-runs.md](docs/devnet-runs.md).
+
 ## License
 
 The code in this repository is licensed under the [Business Source License 1.1](LICENSE). Percolator is licensed
