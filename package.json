@@ -1,0 +1,12 @@
+{
+  "name": "bust-percolator-scripts",
+  "private": true,
+  "description": "Devnet scripts for Bust markets on Percolator: a test coin, its PumpSwap pool and recorded runs",
+  "license": "SEE LICENSE IN LICENSE",
+  "dependencies": {
+    "@pump-fun/pump-swap-sdk": "2.1.0",
+    "@solana/spl-token": "0.4.15",
+    "@solana/web3.js": "1.99.0",
+    "bn.js": "5.2.5"
+  }
+}
