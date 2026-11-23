@@ -12,6 +12,7 @@
 //!   perc trade <contracts>          the trader against the house at the effective mark (positive: long)
 //!   perc withdraw <usdc>            the trader withdraws collateral
 //!   perc convert <usdc>             the trader converts released profit into capital
+//!   perc pusher <window_secs>       follow the PumpSwap pool: push its time-weighted average every 4 s
 //!
 //! Configuration: devnet.json (RPC, program id, collateral mint). Keys: HOUSE_KEYPAIR (default
 //! ~/.config/solana/id.json), MINT_AUTHORITY_KEYPAIR (the collateral mint's authority, default the house), and
@@ -52,6 +53,7 @@ fn main() -> Result<()> {
         Some("trade") => trade::trade(&c, &read_state()?, arg(1)?.parse()?),
         Some("withdraw") => trade::withdraw(&c, &read_state()?, usdc(&arg(1)?)?),
         Some("convert") => trade::convert(&c, &read_state()?, usdc(&arg(1)?)?),
+        Some("pusher") => mark::pusher(&c, &read_state()?, arg(1)?.parse()?),
         _ => bail!("unknown command; see the list at the top of client/src/main.rs"),
     }
 }
