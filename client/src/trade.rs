@@ -49,7 +49,7 @@ fn quote(c: &Ctx, oi_long_q: u128, oi_short_q: u128, mark: u64, position_q: i128
     }
     let gap = (spot - mark as f64) / mark as f64;
     let gains = (next_q > 0 && gap > 0.0) || (next_q < 0 && gap < 0.0);
-    let gap_bps = (gap.abs() * 10_000.0).ceil() as u64;
+    let gap_bps = (gap.abs() * 10_000.0).round() as u64;
     if gains && gap_bps > max_gap_bps {
         bail!(
             "the house does not quote: the pool ({:.4}) is {} bps from the mark ({:.4}), past {} bps, on the side that gains",
