@@ -3,7 +3,8 @@
 // The pool column comes from the transactions that moved the pool (the buy and the sell, and the holders' trades when
 // they ran), at the times they confirmed: the recorder reads the pool at the start of a tick and stamps the tick at
 // its end, a few seconds later.
-// Profit: the trader's PnL after the close. Cost: the house's collateral round trip through the pool, read from the buy
+// Profit: the trader's equity (capital and PnL) after the close against its equity before the open, so a close that
+// converted its profit counts the same as one that left it as PnL, and a fee paid at the open counts against it. Cost: the house's collateral round trip through the pool, read from the buy
 // and sell transactions' token balances.
 const fs = require("fs");
 const { connection: c, house, collateral, statePath } = require("./common.cjs");
@@ -25,10 +26,17 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
   // the client's output for a trade: an optional quote line, the trade line, then the market and both portfolios
   const lines = (e) => e.out ?? [e.line, ...(e.after ?? [])];
   const tradeLine = (e) => lines(e).find((l) => l.startsWith("trade "));
-  const profit = Number(/pnl \$?(-?[\d.]+)/.exec(lines(ev.close).find((l) => l.trim().startsWith("trader")))[1]);
+  const equity = (e) => {
+    const m = /capital (-?[\d.]+) pnl (-?[\d.]+)/.exec(lines(e).find((l) => l.trim().startsWith("trader")));
+    return Number(m[1]) + Number(m[2]);
+  };
+  const openFeeBps = Number(/fee (\d+) bps/.exec(lines(ev.open).find((l) => l.startsWith("house quote")) ?? "fee 0 bps")[1]);
   // a run recorded before the full output was kept has only the quote line for its open: its mark is the entry
   const entry = tradeLine(ev.open) ? Number(/at ([\d.]+)/.exec(tradeLine(ev.open))[1]) : Number(/mark ([\d.]+)/.exec(lines(ev.open)[0])[1]);
   const closePrice = Number(/at ([\d.]+)/.exec(tradeLine(ev.close))[1]);
+  const contracts = Math.abs(Number(/trade (-?[\d.]+) contracts/.exec(tradeLine(ev.close))[1]));
+  const openFee = (contracts * entry * openFeeBps) / 10_000;
+  const profit = equity(ev.close) - (equity(ev.open) + openFee);
 
   // Every move of the pool in a run, at its confirmation time: the attacker's buy and sell, and the holders' trades
   // when they ran (state/holders-<tag>.jsonl).
@@ -64,6 +72,7 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
     poolMove: pool1 / entry - 1,
     perpMove: closePrice / entry - 1,
     profit,
+    openFee,
     cost: -(buy + sell),
     holders: holders.length ? { trades: holders.length, sold: holdersSold, bought: holdersBought } : null,
     sigs: { open: tradeLine(ev.open) ? /: (\w+)$/.exec(tradeLine(ev.open))[1] : null, pump: sig(ev.pump.out), close: /: (\w+)$/.exec(tradeLine(ev.close))[1], dump: sig(ev.dump.out) },
