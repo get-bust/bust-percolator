@@ -6,11 +6,11 @@
 //   node scripts/holders.cjs <tag> [half_life_s=120] [band_bps=200] [window_s=1800]
 // Each trade is a JSON line in state/holders-<tag>.jsonl. Runs until it is stopped.
 const fs = require("fs");
-const { ComputeBudgetProgram, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } = require("@solana/web3.js");
+const { PublicKey, SystemProgram } = require("@solana/web3.js");
 const spl = require("@solana/spl-token");
 const BN = require("bn.js");
 const amm = require("@pump-fun/pump-swap-sdk");
-const { connection: c, house, mintAuthority, collateral, readState, statePath } = require("./common.cjs");
+const { connection: c, house, mintAuthority, collateral, readState, statePath, send } = require("./common.cjs");
 const { loadOrNew } = require("./keys.cjs");
 
 const holders = loadOrNew("holders.json");
@@ -23,7 +23,7 @@ async function fund() {
   await spl.transfer(c, house, from.address, coin.address, house, 150_000_000n * 1_000_000n);
   const usdc = await spl.getOrCreateAssociatedTokenAccount(c, house, collateral, holders.publicKey);
   await spl.mintTo(c, house, collateral, usdc.address, mintAuthority, 3_000n * 1_000_000n);
-  const sig = await sendAndConfirmTransaction(c, new Transaction().add(SystemProgram.transfer({ fromPubkey: house.publicKey, toPubkey: holders.publicKey, lamports: 200_000_000 })), [house]);
+  const sig = await send([SystemProgram.transfer({ fromPubkey: house.publicKey, toPubkey: holders.publicKey, lamports: 200_000_000 })], [house]);
   console.log("holders", holders.publicKey.toBase58(), "funded:", sig);
 }
 
@@ -35,8 +35,7 @@ async function reserves() {
 async function swap(side, raw) {
   const state = await new amm.OnlinePumpAmmSdk(c).swapSolanaState(new PublicKey(pool.pool), holders.publicKey);
   const ixs = side === "sell" ? await amm.PUMP_AMM_SDK.sellBaseInput(state, new BN(raw), 50) : await amm.PUMP_AMM_SDK.buyQuoteInput(state, new BN(raw), 50);
-  const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 20_000 }), ...ixs);
-  return sendAndConfirmTransaction(c, tx, [holders], { commitment: "confirmed" });
+  return send(ixs, [holders]);
 }
 
 async function run(tag, halfLife, bandBps, window) {

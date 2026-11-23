@@ -4,19 +4,13 @@
 //   node scripts/pool.cjs buy <usdc>     spend collateral on TMEME (the price goes up)
 //   node scripts/pool.cjs sell <tmeme>   sell TMEME for collateral (the price goes down)
 // The house pays and holds the coin; state/pool.json keeps the pool and its two vaults.
-const { ComputeBudgetProgram, Keypair, PublicKey, Transaction, sendAndConfirmTransaction } = require("@solana/web3.js");
+const { Keypair, PublicKey } = require("@solana/web3.js");
 const spl = require("@solana/spl-token");
 const BN = require("bn.js");
 const amm = require("@pump-fun/pump-swap-sdk");
-const { connection: c, house, mintAuthority, collateral, readState, writeState } = require("./common.cjs");
+const { connection: c, house, mintAuthority, collateral, readState, writeState, send: sendAs } = require("./common.cjs");
 
-const send = (ixs, signers = [house]) =>
-  sendAndConfirmTransaction(
-    c,
-    new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 20_000 }), ...ixs),
-    signers,
-    { commitment: "confirmed" },
-  );
+const send = (ixs) => sendAs(ixs, [house]);
 
 async function reserves(st) {
   const [b, q] = await Promise.all([c.getTokenAccountBalance(new PublicKey(st.baseVault)), c.getTokenAccountBalance(new PublicKey(st.quoteVault))]);
