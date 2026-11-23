@@ -1,0 +1,16 @@
+[package]
+name = "perc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Devnet client for Bust markets on Percolator"
+license-file = "../LICENSE"
+
+[dependencies]
+percolator-prog = { path = "../percolator-prog", features = ["no-entrypoint"] }
+solana-client = "1.18"
+solana-sdk = "1.18"
+spl-token = { version = "4.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "3.0", features = ["no-entrypoint"] }
+serde_json = "1"
+anyhow = "1"
