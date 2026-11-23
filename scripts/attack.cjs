@@ -33,7 +33,8 @@ const mark = (name, extra = {}) => {
   console.log(new Date(e.ms).toISOString(), name, JSON.stringify(extra));
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", cwd: ROOT });
+// A step still running after three minutes stops the run: a hold that stretches on is a different run.
+const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", cwd: ROOT, timeout: 180_000 });
 const last = () => {
   const lines = fs.readFileSync(TICKS, "utf8").trim().split("\n").filter(Boolean);
   return lines.length ? JSON.parse(lines.at(-1)) : null;
