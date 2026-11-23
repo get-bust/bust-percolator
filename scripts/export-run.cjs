@@ -21,9 +21,13 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
   };
   const buy = await delta(sig(ev.pump.out));
   const sell = await delta(sig(ev.dump.out));
-  const profit = Number(/pnl \$?(-?[\d.]+)/.exec(ev.close.after.find((l) => l.trim().startsWith("trader")))[1]);
-  const entry = Number(/at ([\d.]+)/.exec(ev.open.line)[1]);
-  const closePrice = Number(/at ([\d.]+)/.exec(ev.close.line)[1]);
+  // the client's output for a trade: an optional quote line, the trade line, then the market and both portfolios
+  const lines = (e) => e.out ?? [e.line, ...(e.after ?? [])];
+  const tradeLine = (e) => lines(e).find((l) => l.startsWith("trade "));
+  const profit = Number(/pnl \$?(-?[\d.]+)/.exec(lines(ev.close).find((l) => l.trim().startsWith("trader")))[1]);
+  // a run recorded before the full output was kept has only the quote line for its open: its mark is the entry
+  const entry = tradeLine(ev.open) ? Number(/at ([\d.]+)/.exec(tradeLine(ev.open))[1]) : Number(/mark ([\d.]+)/.exec(lines(ev.open)[0])[1]);
+  const closePrice = Number(/at ([\d.]+)/.exec(tradeLine(ev.close))[1]);
 
   const pool0 = ticks[0].spot;
   const pool1 = Number(/-> ([\d.]+)/.exec(ev.pump.out[1])[1]);
@@ -49,7 +53,7 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
     perpMove: closePrice / entry - 1,
     profit,
     cost: -(buy + sell),
-    sigs: { open: /: (\w+)$/.exec(ev.open.line)[1], pump: sig(ev.pump.out), close: /: (\w+)$/.exec(ev.close.line)[1], dump: sig(ev.dump.out) },
+    sigs: { open: tradeLine(ev.open) ? /: (\w+)$/.exec(tradeLine(ev.open))[1] : null, pump: sig(ev.pump.out), close: /: (\w+)$/.exec(tradeLine(ev.close))[1], dump: sig(ev.dump.out) },
   };
   fs.writeFileSync(out, JSON.stringify(data, null, 1));
   console.log({ ticks: series.length, entry, closePrice, poolMove: data.poolMove, perpMove: data.perpMove, profit, cost: data.cost, net: profit - data.cost });
