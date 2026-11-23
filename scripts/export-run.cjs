@@ -1,7 +1,8 @@
 // A recorded run as one JSON file for charts: node scripts/export-run.cjs <tag> <out.json>
 // Ticks: wall-clock ms, the pool's price and the effective mark (USDC per 1M coins). Events: open, pump, close, dump.
-// The pool column comes from the two transactions that moved the pool (the buy and the sell), at the times they
-// confirmed: the recorder reads the pool at the start of a tick and stamps the tick at its end, a few seconds later.
+// The pool column comes from the transactions that moved the pool (the buy and the sell, and the holders' trades when
+// they ran), at the times they confirmed: the recorder reads the pool at the start of a tick and stamps the tick at
+// its end, a few seconds later.
 // Profit: the trader's PnL after the close. Cost: the house's collateral round trip through the pool, read from the buy
 // and sell transactions' token balances.
 const fs = require("fs");
@@ -29,19 +30,30 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
   const entry = tradeLine(ev.open) ? Number(/at ([\d.]+)/.exec(tradeLine(ev.open))[1]) : Number(/mark ([\d.]+)/.exec(lines(ev.open)[0])[1]);
   const closePrice = Number(/at ([\d.]+)/.exec(tradeLine(ev.close))[1]);
 
+  // Every move of the pool in a run, at its confirmation time: the attacker's buy and sell, and the holders' trades
+  // when they ran (state/holders-<tag>.jsonl).
+  const holdersFile = statePath(`holders-${tag}.jsonl`);
+  const holders = fs.existsSync(holdersFile)
+    ? fs.readFileSync(holdersFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    : [];
+  const moves = [
+    { ms: ev.pump.ms, price: Number(/-> ([\d.]+)/.exec(ev.pump.out[1])[1]), at: "buy confirmed" },
+    { ms: ev.dump.ms, price: Number(/-> ([\d.]+)/.exec(ev.dump.out[1])[1]), at: "sell confirmed" },
+    ...holders.map((h) => ({ ms: h.ms, price: h.after, at: `holders ${h.side}` })),
+  ].sort((a, b) => a.ms - b.ms);
   const pool0 = ticks[0].spot;
-  const pool1 = Number(/-> ([\d.]+)/.exec(ev.pump.out[1])[1]);
-  const pool2 = Number(/-> ([\d.]+)/.exec(ev.dump.out[1])[1]);
-  const seen = [...new Set(ticks.map((k) => k.spot.toFixed(4)))];
-  if (!seen.every((v) => [pool0, pool1, pool2].some((p) => Math.abs(p - Number(v)) < 1e-4))) throw new Error(`the pool moved outside the run: ${seen}`);
+  const poolAt = (ms) => moves.filter((m) => m.ms <= ms).at(-1)?.price ?? pool0;
+  if (!holders.length) {
+    const seen = [...new Set(ticks.map((k) => k.spot.toFixed(4)))];
+    if (!seen.every((v) => [pool0, ...moves.map((m) => m.price)].some((p) => Math.abs(p - Number(v)) < 1e-4))) throw new Error(`the pool moved outside the run: ${seen}`);
+  }
   const before = (ms) => ticks.filter((k) => k.ms <= ms).at(-1).effective;
-  const series = [
-    ...ticks.map((k) => ({ ms: k.ms, effective: k.effective })),
-    { ms: ev.pump.ms, effective: before(ev.pump.ms), at: "buy confirmed" },
-    { ms: ev.dump.ms, effective: before(ev.dump.ms), at: "sell confirmed" },
-  ]
+  const series = [...ticks.map((k) => ({ ms: k.ms, effective: k.effective })), ...moves.map((m) => ({ ms: m.ms, effective: before(m.ms), at: m.at }))]
     .sort((a, b) => a.ms - b.ms)
-    .map((k) => ({ ...k, spot: k.ms < ev.pump.ms ? pool0 : k.ms < ev.dump.ms ? pool1 : pool2 }));
+    .map((k) => ({ ...k, spot: poolAt(k.ms) }));
+  const pool1 = moves[0].price;
+  const holdersSold = holders.filter((h) => h.side === "sell").length;
+  const holdersBought = holders.filter((h) => h.side === "buy").length;
 
   const data = {
     run: tag,
@@ -53,6 +65,7 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
     perpMove: closePrice / entry - 1,
     profit,
     cost: -(buy + sell),
+    holders: holders.length ? { trades: holders.length, sold: holdersSold, bought: holdersBought } : null,
     sigs: { open: tradeLine(ev.open) ? /: (\w+)$/.exec(tradeLine(ev.open))[1] : null, pump: sig(ev.pump.out), close: /: (\w+)$/.exec(tradeLine(ev.close))[1], dump: sig(ev.dump.out) },
   };
   fs.writeFileSync(out, JSON.stringify(data, null, 1));
