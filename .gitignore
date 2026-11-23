@@ -1,0 +1,8 @@
+.DS_Store
+target
+node_modules
+
+# Keypairs and run state created by the client and scripts
+keys
+state
+*.env
