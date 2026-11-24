@@ -2,7 +2,12 @@
 
 use crate::ctx::{eng, load_or_new, pk, read_state, vault_accounts, write_state, Ctx};
 use anyhow::Result;
-use percolator_prog::{constants::PORTFOLIO_ACCOUNT_LEN, ix::Instruction as Ix, state};
+use percolator_prog::{
+    constants::PORTFOLIO_ACCOUNT_LEN,
+    ix::Instruction as Ix,
+    risk::{BackingBucketStatusV16, BackingBucketV16, BOUND_SCALE},
+    state,
+};
 use serde_json::{json, Value};
 use solana_sdk::{instruction::AccountMeta, pubkey::Pubkey, signature::Signer, system_instruction};
 
@@ -223,48 +228,149 @@ pub fn show(c: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// Backing lasts this many slots from a top-up (about nine days at 400 ms).
-const BACKING_SLOTS: u64 = 2_000_000;
+/// Backing lasts this many slots from a top-up, about a year at 400 ms. A live market puts no cap on a backing's
+/// expiry, and a bucket that is still fresh takes more backing only at the expiry it already has, so a short expiry
+/// cannot be pushed out while it runs: the house sets a far one instead of renewing.
+const BACKING_SLOTS: u64 = 78_840_000;
+
+/// Each side's backing bucket, and the expiry a top-up must carry: a fresh bucket's own, otherwise BACKING_SLOTS on
+/// from now.
+fn backing_bucket(c: &Ctx, group: &state::MarketGroupV16, domain: u16) -> Result<(BackingBucketV16, u64)> {
+    let bucket = group.source_backing_buckets[domain as usize].clone();
+    let now = c.rpc.get_slot()?.max(group.current_slot);
+    let expiry = if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot > now {
+        bucket.expiry_slot
+    } else {
+        now + BACKING_SLOTS
+    };
+    Ok((bucket, expiry))
+}
 
 /// The house backs both sides of asset 0 with `amount` collateral atoms each: domain 1 pays the asset's long winners,
 /// domain 0 its short winners. A winner is paid only from the backing of its own domain, and only a position opened
 /// while that backing was in place holds a claim on it; profit with no claim stays junior and cannot be withdrawn.
 pub fn back(c: &Ctx, st: &Value, amount: u128) -> Result<()> {
     let market = pk(st, "market")?;
-    let house_tokens = spl_associated_token_account::get_associated_token_address(&c.house.pubkey(), &pk(st, "mint")?);
     for domain in [0u16, 1u16] {
         let data = c.data(&market)?;
         let (_, group) = eng(state::read_market(&data))?;
-        let seq = eng(state::read_asset_control_sequences(&data, 0))?;
-        let profile = eng(state::read_asset_oracle_profile(&data, 0))?;
-        let (fee_bps, insurance_share_bps) = if domain == 0 {
-            (profile.backing_trade_fee_bps_long, profile.backing_trade_fee_insurance_share_bps_long)
-        } else {
-            (profile.backing_trade_fee_bps_short, profile.backing_trade_fee_insurance_share_bps_short)
-        };
-        let sig = c.send(
-            vec![c.prog(
-                Ix::TopUpBackingBucket {
-                    domain,
-                    market_id: group.assets[0].market_id,
-                    intent_id: seq.backing_top_up + 1,
-                    authority_epoch: seq.authority_epoch,
-                    backing_fee_bps: fee_bps,
-                    insurance_share_bps,
-                    amount,
-                    expiry_slot: c.rpc.get_slot()?.max(group.current_slot) + BACKING_SLOTS,
-                },
-                vec![
-                    AccountMeta::new(c.house.pubkey(), true),
-                    AccountMeta::new(market, false),
-                    AccountMeta::new(house_tokens, false),
-                    AccountMeta::new(pk(st, "vault")?, false),
-                    AccountMeta::new_readonly(spl_token::ID, false),
-                ],
-            )],
-            &[&c.house],
-        )?;
-        println!("backing domain {domain}: {} ({sig})", amount as f64 / 1e6);
+        let (_, expiry) = backing_bucket(c, &group, domain)?;
+        let sig = c.send(vec![top_up_ix(c, st, &data, &group, domain, amount, expiry)?], &[&c.house])?;
+        println!("backing domain {domain}: {} until slot {expiry} ({sig})", amount as f64 / 1e6);
     }
     show(c)
+}
+
+/// Moves each side's backing to a far expiry: the bucket's unliened backing is withdrawn and the same amount topped
+/// back up at BACKING_SLOTS from now, in one transaction. A bucket takes a new expiry only once it is empty, and only
+/// backing no open position holds a claim on can be withdrawn, so a side with claims is left until they close.
+pub fn renew(c: &Ctx, st: &Value) -> Result<()> {
+    let market = pk(st, "market")?;
+    let mint = pk(st, "mint")?;
+    let house_tokens = spl_associated_token_account::get_associated_token_address(&c.house.pubkey(), &mint);
+    for domain in [0u16, 1u16] {
+        let data = c.data(&market)?;
+        let (_, group) = eng(state::read_market(&data))?;
+        let (bucket, _) = backing_bucket(c, &group, domain)?;
+        let now = c.rpc.get_slot()?.max(group.current_slot);
+        if bucket.status != BackingBucketStatusV16::Fresh || bucket.expiry_slot <= now {
+            println!("backing domain {domain}: {:?} at slot {}, nothing fresh to renew", bucket.status, bucket.expiry_slot);
+            continue;
+        }
+        if bucket.expiry_slot >= now + BACKING_SLOTS / 2 {
+            println!("backing domain {domain}: runs until slot {}, far enough", bucket.expiry_slot);
+            continue;
+        }
+        if bucket.valid_liened_backing_num != 0 || bucket.fresh_unliened_backing_num % BOUND_SCALE != 0 {
+            println!("backing domain {domain}: open positions hold claims on it; renew it once they close");
+            continue;
+        }
+        // The engine lets no backing leave while a loss is outstanding anywhere in the market
+        let barrier = group.pending_domain_loss_barriers[domain as usize];
+        if group.negative_pnl_account_count != 0
+            || barrier != 0
+            || group.threshold_stress_active
+            || group.loss_stale_active
+            || group.recovery_reason.is_some()
+        {
+            println!(
+                "backing domain {domain}: a loss is outstanding (portfolios with negative PnL {}, loss barrier {barrier}, \
+                 stress {}, stale loss {}, recovery {:?}); crank the portfolios that carry it, then renew",
+                group.negative_pnl_account_count,
+                group.threshold_stress_active,
+                group.loss_stale_active,
+                group.recovery_reason
+            );
+            continue;
+        }
+        let amount = bucket.fresh_unliened_backing_num / BOUND_SCALE;
+        let seq = eng(state::read_asset_control_sequences(&data, 0))?;
+        let withdraw = c.prog(
+            Ix::WithdrawBackingBucket {
+                domain,
+                market_id: group.assets[0].market_id,
+                authority_epoch: seq.authority_epoch,
+                amount,
+            },
+            vec![
+                AccountMeta::new(c.house.pubkey(), true),
+                AccountMeta::new(market, false),
+                AccountMeta::new(house_tokens, false),
+                AccountMeta::new(pk(st, "vault")?, false),
+                AccountMeta::new_readonly(pk(st, "vaultAuthority")?, false),
+                AccountMeta::new_readonly(spl_token::ID, false),
+            ],
+        );
+        let expiry = now + BACKING_SLOTS;
+        let top_up = top_up_ix(c, st, &data, &group, domain, amount, expiry)?;
+        // The part of a bucket the losers paid in leaves only once every position is settled and the other side's
+        // claims are backed; the engine refuses the whole withdrawal otherwise, and the bucket keeps its expiry
+        match c.send(vec![withdraw, top_up], &[&c.house]) {
+            Ok(sig) => println!("backing domain {domain}: {} moved from slot {} to {expiry} ({sig})", amount as f64 / 1e6, bucket.expiry_slot),
+            Err(e) => println!(
+                "backing domain {domain}: the engine kept it at slot {} ({})",
+                bucket.expiry_slot,
+                e.to_string().lines().find(|l| l.contains("custom program error")).unwrap_or("refused").trim()
+            ),
+        }
+    }
+    show(c)
+}
+
+fn top_up_ix(
+    c: &Ctx,
+    st: &Value,
+    data: &[u8],
+    group: &state::MarketGroupV16,
+    domain: u16,
+    amount: u128,
+    expiry_slot: u64,
+) -> Result<solana_sdk::instruction::Instruction> {
+    let seq = eng(state::read_asset_control_sequences(data, 0))?;
+    let profile = eng(state::read_asset_oracle_profile(data, 0))?;
+    let (backing_fee_bps, insurance_share_bps) = if domain == 0 {
+        (profile.backing_trade_fee_bps_long, profile.backing_trade_fee_insurance_share_bps_long)
+    } else {
+        (profile.backing_trade_fee_bps_short, profile.backing_trade_fee_insurance_share_bps_short)
+    };
+    let house_tokens = spl_associated_token_account::get_associated_token_address(&c.house.pubkey(), &pk(st, "mint")?);
+    Ok(c.prog(
+        Ix::TopUpBackingBucket {
+            domain,
+            market_id: group.assets[0].market_id,
+            intent_id: seq.backing_top_up + 1,
+            authority_epoch: seq.authority_epoch,
+            backing_fee_bps,
+            insurance_share_bps,
+            amount,
+            expiry_slot,
+        },
+        vec![
+            AccountMeta::new(c.house.pubkey(), true),
+            AccountMeta::new(pk(st, "market")?, false),
+            AccountMeta::new(house_tokens, false),
+            AccountMeta::new(pk(st, "vault")?, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+    ))
 }
