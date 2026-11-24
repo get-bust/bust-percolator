@@ -60,16 +60,19 @@ creates to `keys/` and the addresses of the market to `state/perc.json`; neither
 |---|---|
 | `pool.cjs` | Mints a test coin and opens its PumpSwap pool against the collateral; `buy` and `sell` move its price |
 | `attack.cjs` | A recorded manipulation run: opens a long, pumps the pool, holds it, closes and sells back |
+| `holders.cjs` | Holders who sell into a pump and buy back a dip, pulling the pool toward its average |
+| `defend.cjs` | The attacker's buy-backs that hold a pump against the holders (`attack.cjs --defend`) |
 | `export-run.cjs` | A recorded run as one JSON file for charts |
 
 ## Devnet results
 
-Four manipulation runs against a 2,000 USDC pool, each pumping it 124% with 1,000 USDC. With only the engine's price
+Five manipulation runs against a 2,000 USDC pool, each pumping it 124% with 1,000 USDC. With only the engine's price
 cap (runs 1 and 2, a trader long 200 contracts) the attacker came out 162.66 and 294.60 USDC ahead. With the house's
 defenses (backing, an open interest cap at 5% of the pool's depth, a gap fee, a 30-minute average) the trader could
-open 24 contracts: with nobody trading against the pump the attacker still came out 114.44 USDC ahead (run 3), and with
-holders selling into it he lost 237.16 USDC (run 4). The holders' pace is an assumption. Details, transactions and what
-is left before mainnet: [docs/devnet-runs.md](docs/devnet-runs.md).
+open 24 contracts: with nobody trading against the pump the attacker still came out 114.44 USDC ahead (run 3), with
+holders selling into it the attacker lost 237.16 USDC (run 4), and buying back everything the holders sold to hold the
+pump through the whole average lost 737.45 USDC (run 5). The holders' pace and supply are assumptions. Details,
+transactions and what is left before mainnet: [docs/devnet-runs.md](docs/devnet-runs.md).
 
 ## License
 

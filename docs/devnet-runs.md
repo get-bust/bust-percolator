@@ -1,17 +1,20 @@
 # Devnet runs
 
-Four runs on 23 November 2026 asked one question: if the price of a perp follows a Pump coin's pool, can the trader
-holding the perp move the pool far enough, for long enough, to take more from the house than moving the pool costs?
+Five runs on 23 and 24 November 2026 asked one question: if the price of a perp follows a Pump coin's pool, can the
+trader holding the perp move the pool far enough, for long enough, to take more from the house than moving the pool
+costs?
 
-Runs 1 and 2 had no defenses beyond the engine's price cap, and the attack paid. Runs 3 and 4 had the defenses below. In
-run 3 nobody traded against the pump, and the attack still paid. In run 4 holders sold into it, and the attack lost.
+Runs 1 and 2 had no defenses beyond the engine's price cap, and the attack paid. Runs 3 to 5 had the defenses below. In
+run 3 nobody traded against the pump, and the attack still paid. In run 4 holders sold into it, and the attack lost. In
+run 5 the attacker bought back everything the holders sold and held the pump until the perp had taken the whole move,
+and the attack lost more.
 
 ## Setup
 
 | | |
 |---|---|
 | Program | [`7R1ED7LLqoP468afxJfq9HJ5ikqT4z73C6AYoE7evdPo`](https://explorer.solana.com/address/7R1ED7LLqoP468afxJfq9HJ5ikqT4z73C6AYoE7evdPo?cluster=devnet), percolator-prog `aac89b9` |
-| Market group | runs 1-2 [`B478hYUsfcNixoqWoAnrAVYJrQN63uJpeDC2K9cJVdiF`](https://explorer.solana.com/address/B478hYUsfcNixoqWoAnrAVYJrQN63uJpeDC2K9cJVdiF?cluster=devnet), runs 3-4 [`DjBxSVasLpCbgTubnSDtVZeSwc4kRW8nUePvBkJdMdLL`](https://explorer.solana.com/address/DjBxSVasLpCbgTubnSDtVZeSwc4kRW8nUePvBkJdMdLL?cluster=devnet) |
+| Market group | runs 1-2 [`B478hYUsfcNixoqWoAnrAVYJrQN63uJpeDC2K9cJVdiF`](https://explorer.solana.com/address/B478hYUsfcNixoqWoAnrAVYJrQN63uJpeDC2K9cJVdiF?cluster=devnet), runs 3-5 [`DjBxSVasLpCbgTubnSDtVZeSwc4kRW8nUePvBkJdMdLL`](https://explorer.solana.com/address/DjBxSVasLpCbgTubnSDtVZeSwc4kRW8nUePvBkJdMdLL?cluster=devnet) |
 | Test coin | TMEME [`Gi9X3LhFeMarqEBB19mdHqErP6ZEh9U2GtsKLThbECB1`](https://explorer.solana.com/address/Gi9X3LhFeMarqEBB19mdHqErP6ZEh9U2GtsKLThbECB1?cluster=devnet) |
 | Pool | PumpSwap [`JA8UWBKQ2cpfycCMzxsWJtrsBb2SbrxZTFDKM65Sjcy5`](https://explorer.solana.com/address/JA8UWBKQ2cpfycCMzxsWJtrsBb2SbrxZTFDKM65Sjcy5?cluster=devnet), opened at 500M TMEME against 2,000 USDC, 4 USDC per 1M TMEME |
 | Margin | 10% initial (10x), 5% maintenance |
@@ -63,7 +66,7 @@ What they showed:
 
 ## The defenses
 
-Runs 3 and 4 ran on a new market group with four changes.
+Runs 3 to 5 ran on a new market group with four changes.
 
 - **The house backs both sides.** It tops up the backing of the asset's long winners and of its short winners
   (`perc back`), so profit converts into capital and can be withdrawn. An honest winner did: a long of 10 contracts
@@ -135,13 +138,45 @@ What they showed:
    new top-ups (`EngineLockActive`), and cranking the portfolios that held claims on it did not. The house's backing on
    the new market group lasts 2,000,000 slots, about nine days, and has to be renewed before it lapses.
 
+## Run 5: the attacker holds the pump
+
+Run 4's attacker left after two minutes. Run 5's stayed: the same market, trader, pump and holders as run 4 (half-life
+120 s, starting with 150M TMEME and 3,000 USDC), but the long was held for 1,900 s, longer than the average's 30
+minutes, and whenever the pool slipped more than 0.5% below the pumped price the attacker bought it back up
+(`scripts/defend.cjs`). At the close every coin the attacker had bought, the pump's and the defense's, was sold back.
+
+| | Run 5, holders, pump defended |
+|---|---|
+| Open | 24 contracts at 4.0007, fee 0 |
+| Pump | 1,000 USDC, pool 4.00 → 8.96 (+124%) |
+| Held | 31.7 minutes. The holders sold into the pump 57 times, all 150M TMEME they had, 149.4M of it in the first five minutes; the attacker bought the pool back up in 54 buys, 146.4M TMEME for 1,300.50 USDC |
+| Perp, entry → close | 4.00 → 8.94 (+123%) |
+| Trader's profit | 118.49 USDC, converted in the close |
+| Pool round trip | −855.94 USDC: 2,300.50 in, 1,444.56 back. Selling 313.1M TMEME took the pool from 8.93 to 2.41 |
+| **Attacker, net** | **−737.45 USDC** |
+
+[open](https://explorer.solana.com/tx/37EDBQjhuRJbNJdRiMAFKJLJTZDhGnnCtUAWmv6ikSjiKRqpVnMVDjhcoShW7M5aMmAiDFSz1SDGTFZMpc83A3CY?cluster=devnet),
+[pump](https://explorer.solana.com/tx/3jerPrhbtDA56K7rH4VHXrhAaUtWKiTkmmXMHEjnVrKouVfcWvR4qXJsdf26AFTfU4Gg1USj8yVKTHSo1v1v2AJm?cluster=devnet),
+[close and convert](https://explorer.solana.com/tx/2pndw4PbKobCmJwoPXs7a1GfJ5n46q9n3FJYJRxLqnRGq8NaBphB39GeJTrCafmnjnwBwebNDYdp5b43uqyjMnNt?cluster=devnet),
+[sell back](https://explorer.solana.com/tx/5UFSLLBBUHVVE8yGP1xE3kTfPjMnSFN4dHtByaQhKPynu24C6y5bsQnFajJKEkeX33hrF9yjCyGdQa4gzr1ReyYM?cluster=devnet).
+
+6. **Holding a pump costs what the sellers hold, not how long it is held.** The perp took the whole move and paid its
+   cap, 118 USDC. To get there the attacker had to buy back every coin the holders sold at the pumped price and sell it
+   all again at the end into a pool that could not take it. The holders ran out of coins in about five minutes; after
+   that the pump cost nothing more to hold. Two parts of the model favor the attacker and should be read with the
+   result: the holders compare the price with their own 30-minute average, so their selling fades as that average
+   rises, and their supply was finite, 150M TMEME, 30% of the coins the pool started with. A coin whose sellers hold
+   little would cost little to defend.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
-  a 30-minute average, and the attack again until it lost money (run 4).
+  a 30-minute average, the attack again until it lost money (run 4), and an attacker who held the pump through the
+  whole average (run 5).
 - The house's quoting rules move from the client into an on-chain matcher, and the average from the off-chain pusher
   into an adapter program that reads the pool.
-- A listing floor: only coins whose pools trade enough that a pump meets sellers. Run 4's half-life of 120 s is an
-  assumption; each coin's has to be measured from its pool's own trades before it is listed.
-- An attacker who keeps buying through the hold, instead of pumping once, has not been run.
+- A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
+  of holder supply are assumptions; for each coin, how fast its pool is sold into after a jump and how much is sold
+  have to be measured from the pool's own trades before it is listed, and its open interest cap kept below what
+  absorbing that selling would cost.
 - Renewing the backing before it lapses, and the house's exposure to the backing it provides.
