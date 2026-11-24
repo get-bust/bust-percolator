@@ -168,6 +168,25 @@ minutes, and whenever the pool slipped more than 0.5% below the pumped price the
    rises, and their supply was finite, 150M TMEME, 30% of the coins the pool started with. A coin whose sellers hold
    little would cost little to defend.
 
+## Renewing the backing
+
+Both backing buckets were set to lapse after 2,000,000 slots, about nine days. Renewing them showed:
+
+7. **A backing's expiry cannot be pushed out while it runs.** A bucket that is still fresh takes more backing only
+   at the expiry it already has; a top-up with a later expiry is refused (`EngineLockActive`). A new expiry needs the
+   bucket emptied first, by withdrawing its backing and topping it back up in one transaction (`perc renew`). The
+   engine lets backing leave only while no loss is outstanding anywhere in the market: the first try was refused
+   because a portfolio's loss had not been accrued, and cranking the portfolios cleared it. The short winners' bucket
+   (domain 0), which had never paid a winner, then moved from slot 527,453,029 to 604,463,341, about a year out. The
+   long winners' bucket (domain 1), which had paid run 3's winner 119.60 USDC and been paid into by losers since, was
+   refused even with every position closed: the engine lets the part the losers paid in leave only once every position
+   is settled and the other side's claims are backed, and which of the two held it was not pinned down. It still lapses
+   at slot 527,453,036.
+
+   A live market puts no cap on the expiry, so the client now backs for about a year from the first top-up
+   (`BACKING_SLOTS`), and `perc back` adds to a fresh bucket at its own expiry. On mainnet the house's backing should be
+   set far out from the start rather than renewed.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
@@ -179,4 +198,5 @@ minutes, and whenever the pool slipped more than 0.5% below the pumped price the
   of holder supply are assumptions; for each coin, how fast its pool is sold into after a jump and how much is sold
   have to be measured from the pool's own trades before it is listed, and its open interest cap kept below what
   absorbing that selling would cost.
-- Renewing the backing before it lapses, and the house's exposure to the backing it provides.
+- Backing set a year out from the first top-up, what happens to the positions on a side whose backing lapses anyway
+  (domain 1 on devnet, at slot 527,453,036), and the house's exposure to the backing it provides.
