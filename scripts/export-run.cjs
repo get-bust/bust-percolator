@@ -5,7 +5,7 @@
 // its end, a few seconds later.
 // Profit: the trader's equity (capital and PnL) after the close against its equity before the open, so a close that
 // converted its profit counts the same as one that left it as PnL, and a fee paid at the open counts against it. Cost: the house's collateral round trip through the pool, read from the buy
-// and sell transactions' token balances.
+// and sell transactions' token balances, plus what the attacker spent keeping the pump (state/defend-<tag>.jsonl).
 const fs = require("fs");
 const { connection: c, house, collateral, statePath } = require("./common.cjs");
 
@@ -44,10 +44,16 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
   const holders = fs.existsSync(holdersFile)
     ? fs.readFileSync(holdersFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
     : [];
+  // and the attacker's buys that kept the pump through the hold (state/defend-<tag>.jsonl), when it was defended
+  const defendFile = statePath(`defend-${tag}.jsonl`);
+  const defended = fs.existsSync(defendFile)
+    ? fs.readFileSync(defendFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    : [];
   const moves = [
     { ms: ev.pump.ms, price: Number(/-> ([\d.]+)/.exec(ev.pump.out[1])[1]), at: "buy confirmed" },
     { ms: ev.dump.ms, price: Number(/-> ([\d.]+)/.exec(ev.dump.out[1])[1]), at: "sell confirmed" },
     ...holders.map((h) => ({ ms: h.ms, price: h.after, at: `holders ${h.side}` })),
+    ...defended.map((d) => ({ ms: d.ms, price: d.after, at: "attacker buys back" })),
   ].sort((a, b) => a.ms - b.ms);
   const pool0 = ticks[0].spot;
   const poolAt = (ms) => moves.filter((m) => m.ms <= ms).at(-1)?.price ?? pool0;
@@ -62,6 +68,7 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
   const pool1 = moves[0].price;
   const holdersSold = holders.filter((h) => h.side === "sell").length;
   const holdersBought = holders.filter((h) => h.side === "buy").length;
+  const defendSpent = -defended.reduce((s, d) => s + d.usdc, 0);
 
   const data = {
     run: tag,
@@ -73,8 +80,9 @@ if (!tag || !out) throw new Error("usage: export-run.cjs <tag> <out.json>");
     perpMove: closePrice / entry - 1,
     profit,
     openFee,
-    cost: -(buy + sell),
+    cost: -(buy + sell) + defendSpent,
     holders: holders.length ? { trades: holders.length, sold: holdersSold, bought: holdersBought } : null,
+    defended: defended.length ? { buys: defended.length, usdc: defendSpent } : null,
     sigs: { open: tradeLine(ev.open) ? /: (\w+)$/.exec(tradeLine(ev.open))[1] : null, pump: sig(ev.pump.out), close: /: (\w+)$/.exec(tradeLine(ev.close))[1], dump: sig(ev.dump.out) },
   };
   fs.writeFileSync(out, JSON.stringify(data, null, 1));
