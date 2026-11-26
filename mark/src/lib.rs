@@ -1,5 +1,6 @@
 //! Bust mark: marks one Percolator asset to the time-weighted average of one pool, read on chain: a PumpSwap pool, or
-//! a Raydium CPMM pool (where coins from Raydium's launchpad go). `pools` has their layouts.
+//! a Raydium CPMM pool (where coins from Raydium's launchpad go) or a Raydium AMM v4 pool (where older Pump coins
+//! went). `pools` has their layouts.
 //!
 //! A pool quoted in the collateral is read as it is. A pool quoted in another token (SOL on mainnet) is priced in
 //! dollars at each sample with that token's Pyth price (a `PriceUpdateV2` account with full verification), so the
