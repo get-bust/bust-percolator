@@ -55,8 +55,8 @@ creates to `keys/` and the addresses of the market to `state/perc.json`; neither
 
 ## The mark feed
 
-`mark/` is a small program of our own that marks an asset to its pool. Its feed account holds the pool's two vaults,
-read from the PumpSwap pool account when the feed is made, and a ring of observations. Anyone may call `Update` once
+`mark/` is a small program of our own that marks an asset to its pool, a PumpSwap or Raydium CPMM pool. Its feed
+account holds the pool's two vaults, read from the pool account when the feed is made, and a ring of observations. Anyone may call `Update` once
 the interval has passed: the program reads both vaults, adds an observation and pushes the pool's time-weighted average
 to Percolator as the asset's authority mark, signed by the feed's oracle PDA. The caller picks only the moment, never
 the price. A pool quoted in SOL is priced in dollars at each sample with Pyth's SOL/USD. A sample may move the price the feed holds by at most `max_step_bps` from the one before, so pushing the
@@ -81,6 +81,7 @@ client/target/release/perc feed run 10             # call it every 10 s (perc fe
 | `holders.cjs` | Holders who sell into a pump and buy back a dip, pulling the pool toward its average |
 | `defend.cjs` | The attacker's buy-backs that hold a pump against the holders (`attack.cjs --defend`) |
 | `export-run.cjs` | A recorded run as one JSON file for charts |
+| `cpmm.cjs` | A Raydium CPMM pool of the test coin against SOL, for the mark feed; `buy` and `sell` move its price |
 
 ## Devnet results
 

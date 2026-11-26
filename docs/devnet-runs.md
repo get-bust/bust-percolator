@@ -240,14 +240,21 @@ is refused). On a second test pool, 20M TMEME against 0.8 SOL, the feed read 0.0
 2.8385. Pumped 164% with 0.5 SOL, the price the feed held rose 1% a step and the mark 0.15% over 50 s; the pool's
 dollar price also moved with SOL between samples, which the average takes in the same way.
 
+Coins from Raydium's launchpad (LaunchLab, under letsbonk.fun) graduate to Raydium CPMM pools: on mainnet the
+USELESS/SOL pool is owned by the CPMM program, while older Pump coins such as pippin and VINE sit in Raydium AMM v4
+pools. A CPMM pool keeps the protocol, fund and creator fees it owes inside its vaults, so the feed reads its reserves
+as each vault less those fees, as Raydium's `vault_amount_without_fee` does; read that way the USELESS pool gave
+0.0010516 SOL a coin against GeckoTerminal's 0.0010493 from the last trade. On a devnet CPMM pool, 20M TMEME against
+0.8 SOL, a 161% pump moved the price the feed held 1% a step and the mark 0.18% over 50 s, as on PumpSwap.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
   a 30-minute average, the attack again until it lost money (run 4), and an attacker who held the pump through the
   whole average (run 5).
 - The house's quoting rules move from the client into an on-chain matcher. The average has moved into `mark/` on
-  devnet, SOL pools priced in dollars with Pyth; still to do there: readers for Raydium's pools (CPMM, where coins
-  from Raydium's own launchpad go, and AMM v4, where older Pump coins went), and a keeper that calls it.
+  devnet, SOL pools priced in dollars with Pyth; and Raydium CPMM pools read; still to do there: a reader for
+  Raydium AMM v4, where older Pump coins went, and a keeper that calls it.
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap
