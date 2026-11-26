@@ -1,5 +1,9 @@
 //! Bust mark: marks one Percolator asset to the time-weighted average of one PumpSwap pool, read on chain.
 //!
+//! A pool quoted in the collateral is read as it is. A pool quoted in another token (SOL on mainnet) is priced in
+//! dollars at each sample with that token's Pyth price (a `PriceUpdateV2` account with full verification), so the
+//! average is of the dollar price; a stale or wide Pyth price refuses the update.
+//!
 //! A feed account per asset holds the pool's two vaults and a ring of observations. Anyone may call `Update` once
 //! `min_interval_secs` have passed since the last one: the program reads both vaults itself, adds an observation, and
 //! pushes the average over `window_secs` to Percolator as the asset's authority mark (`PushAuthMark`), signed by the
@@ -10,17 +14,22 @@
 //! `HandOracle` gives the role to another key, signed by the feed's admin and that key, so a feed can be retired.
 //!
 //! Instructions (first byte the tag, then little-endian fields):
-//!   0 Init         asset_index u16, contract_base_atoms u64, window_secs u64, min_interval_secs u64, max_step_bps u64
+//!   0 Init         asset_index u16, contract_base_atoms u64, window_secs u64, min_interval_secs u64, max_step_bps u64,
+//!                  quote_feed_id 32 bytes (zero: quoted in the collateral), max_quote_age_secs u64,
+//!                  max_quote_conf_bps u64, quote_decimals u8
 //!                  [admin (signer, writable), feed (writable), pool, market, percolator, system program,
-//!                   base vault, quote vault]
+//!                   base vault, quote vault, quote price account (when quote_feed_id is set)]
 //!   1 Update       market_id u64, observation_sequence u64, authority_epoch u64
-//!                  [feed (writable), base vault, quote vault, market (writable), oracle PDA, percolator]
+//!                  [feed (writable), base vault, quote vault, market (writable), oracle PDA, percolator,
+//!                   quote price account (when the feed has one)]
 //!   2 TakeOracle   market_id u64, authority_epoch u64
 //!                  [current oracle authority (signer), feed, oracle PDA, market (writable), percolator]
 //!   3 HandOracle   market_id u64, authority_epoch u64, new_authority 32 bytes
 //!                  [admin (signer), feed, oracle PDA, new authority (signer), market (writable), percolator]
 //!   4 SetParams    window_secs u64, min_interval_secs u64, max_step_bps u64
 //!                  [admin (signer), feed (writable)]
+//!   5 Close        [admin (signer, writable), feed (writable)]: the rent back to the admin. The oracle PDA keeps its
+//!                  role, and a feed opened again at the same address has the same PDA.
 
 pub mod twap;
 
@@ -46,6 +55,8 @@ solana_program::entrypoint!(process);
 
 pub const PUMPSWAP: Pubkey = solana_program::pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
 pub const TOKEN: Pubkey = solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+pub const PYTH_RECEIVER: Pubkey = solana_program::pubkey!("rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ");
+const PYTH_PRICE_UPDATE_V2: [u8; 8] = [0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd];
 pub const TOKEN_2022: Pubkey = solana_program::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 
 /// Percolator v16 instruction tags and the oracle role's kind in `UpdateAssetAuthority`.
@@ -54,11 +65,11 @@ const UPDATE_ASSET_AUTHORITY: u8 = 65;
 const ASSET_AUTH_ORACLE: u8 = 4;
 
 pub const POOL_PUMPSWAP: u8 = 0;
-const MAGIC: &[u8; 8] = b"bustmrk1";
+const MAGIC: &[u8; 8] = b"bustmrk2";
 /// Observations kept. The window must fit in this many intervals, so the ring always reaches back to its start.
 pub const RING: usize = 256;
 const OBS_LEN: usize = 24;
-const HEADER_LEN: usize = 264;
+const HEADER_LEN: usize = 352;
 pub const FEED_LEN: usize = HEADER_LEN + RING * OBS_LEN;
 
 /// The feed's fixed fields. Offsets are those of `load` and `store`.
@@ -83,6 +94,12 @@ pub struct Feed {
     /// Index of the newest observation, and how many are stored.
     pub head: u16,
     pub len: u16,
+    /// The quote token's Pyth price account and feed id; the default key when the pool is quoted in the collateral.
+    pub quote_feed: Pubkey,
+    pub quote_feed_id: [u8; 32],
+    pub max_quote_age_secs: u64,
+    pub max_quote_conf_bps: u64,
+    pub quote_decimals: u8,
 }
 
 fn key_at(d: &[u8], o: usize) -> Pubkey {
@@ -118,6 +135,11 @@ impl Feed {
             last_price: u64_at(d, 248),
             head: u16_at(d, 256),
             len: u16_at(d, 258),
+            quote_feed: key_at(d, 264),
+            quote_feed_id: d[296..328].try_into().unwrap(),
+            max_quote_age_secs: u64_at(d, 328),
+            max_quote_conf_bps: u64_at(d, 336),
+            quote_decimals: d[344],
         })
     }
 
@@ -135,6 +157,11 @@ impl Feed {
         }
         d[256..258].copy_from_slice(&self.head.to_le_bytes());
         d[258..260].copy_from_slice(&self.len.to_le_bytes());
+        d[264..296].copy_from_slice(self.quote_feed.as_ref());
+        d[296..328].copy_from_slice(&self.quote_feed_id);
+        d[328..336].copy_from_slice(&self.max_quote_age_secs.to_le_bytes());
+        d[336..344].copy_from_slice(&self.max_quote_conf_bps.to_le_bytes());
+        d[344] = self.quote_decimals;
     }
 }
 
@@ -179,6 +206,7 @@ pub enum MarkError {
     BadParams,
     EmptyPool,
     ShortHistory,
+    QuotePrice,
 }
 
 impl From<MarkError> for ProgramError {
@@ -225,11 +253,44 @@ fn token_amount(ai: &AccountInfo) -> Result<u64, ProgramError> {
     Ok(u64_at(&d, 64))
 }
 
-fn pool_spot(feed: &Feed, base_ai: &AccountInfo, quote_ai: &AccountInfo) -> Result<u64, ProgramError> {
+/// The quote token's dollar price from a Pyth `PriceUpdateV2` account, as (price, expo): full verification, the
+/// feed's id, no older than `max_age` seconds and a confidence within `max_conf_bps` of the price.
+fn quote_price(feed: &Feed, ai: &AccountInfo, now: i64) -> Result<(u64, i32), ProgramError> {
+    if *ai.key != feed.quote_feed || *ai.owner != PYTH_RECEIVER {
+        return Err(MarkError::WrongAccount.into());
+    }
+    let d = ai.try_borrow_data()?;
+    // discriminator, write authority, verification level (1: full), then the price feed message
+    if d.len() < 134 || d[..8] != PYTH_PRICE_UPDATE_V2 || d[40] != 1 || d[41..73] != feed.quote_feed_id {
+        return Err(MarkError::QuotePrice.into());
+    }
+    let price = i64::from_le_bytes(d[73..81].try_into().unwrap());
+    let conf = u64_at(&d, 81);
+    let expo = i32::from_le_bytes(d[89..93].try_into().unwrap());
+    let publish_time = i64::from_le_bytes(d[93..101].try_into().unwrap());
+    let price = u64::try_from(price).ok().filter(|&p| p > 0).ok_or(MarkError::QuotePrice)?;
+    if now.saturating_sub(publish_time) > feed.max_quote_age_secs as i64
+        || conf as u128 * 10_000 > price as u128 * feed.max_quote_conf_bps as u128
+        || !(-18..=0).contains(&expo)
+    {
+        return Err(MarkError::QuotePrice.into());
+    }
+    Ok((price, expo))
+}
+
+/// The pool's price in collateral atoms per contract; `quote_ai` is the quote price account when the feed has one.
+fn pool_spot(feed: &Feed, base_ai: &AccountInfo, quote_ai: &AccountInfo, price_ai: Option<&AccountInfo>, now: i64) -> Result<u64, ProgramError> {
     if *base_ai.key != feed.base_vault || *quote_ai.key != feed.quote_vault {
         return Err(MarkError::WrongAccount.into());
     }
-    twap::spot(token_amount(base_ai)?, token_amount(quote_ai)?, feed.contract_base_atoms).ok_or_else(|| MarkError::EmptyPool.into())
+    let (base, quote) = (token_amount(base_ai)?, token_amount(quote_ai)?);
+    let spot = if feed.quote_feed == Pubkey::default() {
+        twap::spot(base, quote, feed.contract_base_atoms)
+    } else {
+        let (price, expo) = quote_price(feed, price_ai.ok_or(MarkError::QuotePrice)?, now)?;
+        twap::spot_in_collateral(base, quote, feed.contract_base_atoms, price, expo, feed.quote_decimals)
+    };
+    spot.ok_or_else(|| MarkError::EmptyPool.into())
 }
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
@@ -240,6 +301,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         2 => take_oracle(program_id, accounts, &mut rest),
         3 => hand_oracle(program_id, accounts, &mut rest),
         4 => set_params(program_id, accounts, &mut rest),
+        5 => close(program_id, accounts),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -255,6 +317,10 @@ fn init(program_id: &Pubkey, accounts: &[AccountInfo], d: &mut &[u8]) -> Program
     let asset_index = read_u16(d)?;
     let contract_base_atoms = read_u64(d)?;
     let (window_secs, min_interval_secs, max_step_bps) = (read_u64(d)?, read_u64(d)?, read_u64(d)?);
+    let quote_feed_id: [u8; 32] = *d.split_first_chunk::<32>().ok_or(ProgramError::InvalidInstructionData)?.0;
+    *d = &d[32..];
+    let (max_quote_age_secs, max_quote_conf_bps) = (read_u64(d)?, read_u64(d)?);
+    let quote_decimals = *d.first().ok_or(ProgramError::InvalidInstructionData)?;
     check_params(window_secs, min_interval_secs, max_step_bps)?;
     if !admin.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
@@ -279,6 +345,7 @@ fn init(program_id: &Pubkey, accounts: &[AccountInfo], d: &mut &[u8]) -> Program
     };
     let base_ai = next_account_info(it)?;
     let quote_ai = next_account_info(it)?;
+    let price_ai = if quote_feed_id == [0u8; 32] { None } else { Some(next_account_info(it)?) };
 
     let lamports = Rent::get()?.minimum_balance(FEED_LEN);
     let seeds: &[&[u8]] = &[b"feed", market_ai.key.as_ref(), &asset_index.to_le_bytes(), &[bump]];
@@ -305,11 +372,16 @@ fn init(program_id: &Pubkey, accounts: &[AccountInfo], d: &mut &[u8]) -> Program
         last_price: 0,
         head: RING as u16 - 1,
         len: 0,
+        quote_feed: price_ai.map(|a| *a.key).unwrap_or_default(),
+        quote_feed_id,
+        max_quote_age_secs,
+        max_quote_conf_bps,
+        quote_decimals,
     };
-    let spot = pool_spot(&feed, base_ai, quote_ai)?;
+    let now = Clock::get()?.unix_timestamp;
+    let spot = pool_spot(&feed, base_ai, quote_ai, price_ai, now)?;
     // Before the feed existed the price is taken to have been the first one read, for a whole window, so the
     // average starts at the pool's price rather than at the few seconds the feed has seen.
-    let now = Clock::get()?.unix_timestamp;
     let mut d = feed_ai.try_borrow_mut_data()?;
     push_obs(&mut d, &mut feed, Obs { ts: now - window_secs as i64, cum: 0 });
     push_obs(&mut d, &mut feed, Obs { ts: now, cum: spot as u128 * window_secs as u128 });
@@ -342,6 +414,7 @@ fn update(program_id: &Pubkey, accounts: &[AccountInfo], d: &mut &[u8]) -> Progr
     let market_ai = next_account_info(it)?;
     let oracle_ai = next_account_info(it)?;
     let percolator_ai = next_account_info(it)?;
+    let price_ai = next_account_info(it).ok();
     let (market_id, observation_sequence, authority_epoch) = (read_u64(d)?, read_u64(d)?, read_u64(d)?);
     let mut feed = load_feed(program_id, feed_ai)?;
     check_market(&feed, market_ai, percolator_ai, oracle_ai, feed_ai.key)?;
@@ -356,7 +429,7 @@ fn update(program_id: &Pubkey, accounts: &[AccountInfo], d: &mut &[u8]) -> Progr
         let cum = twap::cum_at_now(last, feed.last_price, clock.unix_timestamp).ok_or(ProgramError::ArithmeticOverflow)?;
         push_obs(&mut d, &mut feed, Obs { ts: clock.unix_timestamp, cum });
         let mark = twap::average(&observations(&d, &feed), feed.window_secs as i64).ok_or(MarkError::ShortHistory)?;
-        let spot = pool_spot(&feed, base_ai, quote_ai)?;
+        let spot = pool_spot(&feed, base_ai, quote_ai, price_ai, clock.unix_timestamp)?;
         feed.last_price = twap::clamp_step(spot, feed.last_price, feed.max_step_bps);
         feed.store(&mut d);
         msg!("spot {} held {} mark {}", spot, feed.last_price, mark);
@@ -450,4 +523,22 @@ fn set_params(program_id: &Pubkey, accounts: &[AccountInfo], d: &mut &[u8]) -> P
     feed.max_step_bps = max_step_bps;
     feed.store(&mut feed_ai.try_borrow_mut_data()?);
     Ok(())
+}
+
+fn close(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let it = &mut accounts.iter();
+    let admin = next_account_info(it)?;
+    let feed_ai = next_account_info(it)?;
+    if feed_ai.owner != program_id {
+        return Err(MarkError::WrongAccount.into());
+    }
+    // the admin is at the same offset in every layout, so a feed of an older layout can be closed too
+    if !admin.is_signer || key_at(&feed_ai.try_borrow_data()?, 8) != *admin.key {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    **admin.try_borrow_mut_lamports()? += feed_ai.lamports();
+    **feed_ai.try_borrow_mut_lamports()? = 0;
+    feed_ai.try_borrow_mut_data()?.fill(0);
+    feed_ai.assign(&solana_program::system_program::ID);
+    feed_ai.realloc(0, false)
 }

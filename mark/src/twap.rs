@@ -21,6 +21,22 @@ pub fn spot(base: u64, quote: u64, contract_base_atoms: u64) -> Option<u64> {
     u64::try_from(p).ok().filter(|&p| p > 0)
 }
 
+/// The pool's price in collateral atoms per contract when the pool is quoted in another token (SOL): the quote token's
+/// dollar price from an oracle, `price` times ten to `expo`, and its decimals. The collateral has 6 decimals.
+pub fn spot_in_collateral(base: u64, quote: u64, contract_base_atoms: u64, price: u64, expo: i32, quote_decimals: u8) -> Option<u64> {
+    if base == 0 || quote == 0 || price == 0 {
+        return None;
+    }
+    let num = (quote as u128).checked_mul(contract_base_atoms as u128)?.checked_mul(price as u128)?;
+    let e = expo + 6 - quote_decimals as i32;
+    let p = if e >= 0 {
+        num.checked_mul(10u128.checked_pow(e as u32)?)? / base as u128
+    } else {
+        num / 10u128.checked_pow(e.unsigned_abs())? / base as u128
+    };
+    u64::try_from(p).ok().filter(|&p| p > 0)
+}
+
 /// Holds a sample within `max_step_bps` of the price before it, so one transaction that pushes the pool and samples
 /// it can move the average only one step. Zero turns the limit off.
 pub fn clamp_step(spot: u64, last: u64, max_step_bps: u64) -> u64 {
@@ -74,6 +90,15 @@ mod tests {
         assert_eq!(spot(500_000_000_000_000, 2_000_000_000, 1_000_000_000_000), Some(4_000_000));
         assert_eq!(spot(0, 1, 1), None);
         assert_eq!(spot(10, 1, 1), None); // rounds to zero
+    }
+
+    #[test]
+    fn a_sol_pool_is_priced_in_dollars() {
+        // 500M coins against 25 SOL, SOL at $80 (Pyth: 8_000_000_000 at expo -8): 1M coins are 0.05 SOL, $4
+        let p = spot_in_collateral(500_000_000_000_000, 25_000_000_000, 1_000_000_000_000, 8_000_000_000, -8, 9);
+        assert_eq!(p, Some(4_000_000));
+        // the same pool quoted in a 6-decimal dollar token at $1 reads as the plain price
+        assert_eq!(spot_in_collateral(500_000_000_000_000, 2_000_000_000, 1_000_000_000_000, 100_000_000, -8, 6), Some(4_000_000));
     }
 
     #[test]
