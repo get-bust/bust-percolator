@@ -214,13 +214,34 @@ Findings:
 So the floor is two checks per coin: an age and volume gate, and the coin's own pump and fade measured from its own
 candles before it is listed, with the open interest cap set from that.
 
+## The mark read on chain
+
+Runs 3 to 5 marked the asset from an off-chain pusher signed by the house, which is also the trader's counterparty.
+`mark/` moves the average on chain: the feed reads the pool's vaults itself and its PDA holds the asset's oracle role, so
+the house can no longer push a price (`perc push` now fails with Percolator's `Unauthorized`), and an update sooner than
+the feed's interval is refused. The feed was opened on the run pool with a 30-minute window, a 10 s interval and a 1%
+step, and the pool was then pumped 240% with 1,500 USDC:
+
+| | before | 70 s after the buy |
+|---|---|---|
+| pool | 3.0917 | 10.5194 |
+| price the feed holds | 3.0917 | 3.3814 (eight 1% steps) |
+| mark | 3.0917 | 3.0993 (+0.25%) |
+
+10. **The step limit is what stops a one-transaction pump, and it slows real moves too.** Without it, a transaction
+    that buys, samples and sells back would hold the pumped price for one interval: at 10 s in a 30-minute window,
+    0.56% of the pump. With it, a sample moves 1% at most. A coin that really rises 240% is held at its old price for
+    about twenty minutes before the average even starts to follow; a coin's step and window are set together with its
+    open interest cap when it is listed.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
   a 30-minute average, the attack again until it lost money (run 4), and an attacker who held the pump through the
   whole average (run 5).
-- The house's quoting rules move from the client into an on-chain matcher, and the average from the off-chain pusher
-  into an adapter program that reads the pool.
+- The house's quoting rules move from the client into an on-chain matcher. The average has moved into `mark/` on
+  devnet; still to do there: mainnet pools are quoted in SOL, so the mark needs SOL/USD from Pyth on top of the pool,
+  readers for the older Pump coins' Raydium pools, and a keeper that calls it.
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap

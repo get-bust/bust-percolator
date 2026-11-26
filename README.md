@@ -11,6 +11,7 @@ This repository is a devnet trial. It is not deployed on mainnet and holds no re
 | Network | Program id |
 |---|---|
 | Devnet | [`7R1ED7LLqoP468afxJfq9HJ5ikqT4z73C6AYoE7evdPo`](https://explorer.solana.com/address/7R1ED7LLqoP468afxJfq9HJ5ikqT4z73C6AYoE7evdPo?cluster=devnet) |
+| Devnet, mark feed (`mark/`) | [`DGCkC4YboRrAxFKY5piEgCE9yjT1tCxwzKeMqZ7NCBfo`](https://explorer.solana.com/address/DGCkC4YboRrAxFKY5piEgCE9yjT1tCxwzKeMqZ7NCBfo?cluster=devnet) |
 
 The devnet program is [percolator-prog](https://github.com/aeyakovenko/percolator-prog) at commit
 [`aac89b9`](https://github.com/aeyakovenko/percolator-prog/commit/aac89b9e078696131df2100368d4fd53baec5fac), built
@@ -51,6 +52,22 @@ client/target/release/perc show
 
 The list of commands is at the top of [`client/src/main.rs`](client/src/main.rs). The client writes the keypairs it
 creates to `keys/` and the addresses of the market to `state/perc.json`; neither is committed.
+
+## The mark feed
+
+`mark/` is a small program of our own that marks an asset to its pool. Its feed account holds the pool's two vaults,
+read from the PumpSwap pool account when the feed is made, and a ring of observations. Anyone may call `Update` once
+the interval has passed: the program reads both vaults, adds an observation and pushes the pool's time-weighted average
+to Percolator as the asset's authority mark, signed by the feed's oracle PDA. The caller picks only the moment, never
+the price. A sample may move the price the feed holds by at most `max_step_bps` from the one before, so pushing the
+pool and sampling it in one transaction moves the average one step.
+
+```sh
+cd mark && cargo test && cargo-build-sbf && cd ..
+client/target/release/perc feed init 1800 10 100   # 30-minute average, an update at most every 10 s, 1% per step
+client/target/release/perc feed take               # the feed's PDA takes the oracle role from the house
+client/target/release/perc feed run 10             # call it every 10 s (perc feed release gives the role back)
+```
 
 ## Scripts
 
