@@ -230,9 +230,9 @@ step, and the pool was then pumped 240% with 1,500 USDC:
 
 10. **The step limit is what stops a one-transaction pump, and it slows real moves too.** Without it, a transaction
     that buys, samples and sells back would hold the pumped price for one interval: at 10 s in a 30-minute window,
-    0.56% of the pump. With it, a sample moves 1% at most. A coin that really rises 240% is held at its old price for
-    about twenty minutes before the average even starts to follow; a coin's step and window are set together with its
-    open interest cap when it is listed.
+    0.56% of the pump. With it, a sample moves 1% at most. When a coin really rises 240%, the price the feed holds takes
+    about twenty minutes (123 steps) to reach it, and the 30-minute average trails that; a coin's step and window are
+    set together with its open interest cap when it is listed.
 
 ## Before mainnet
 
