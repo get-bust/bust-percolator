@@ -234,14 +234,20 @@ step, and the pool was then pumped 240% with 1,500 USDC:
     about twenty minutes (123 steps) to reach it, and the 30-minute average trails that; a coin's step and window are
     set together with its open interest cap when it is listed.
 
+Mainnet pools are quoted in SOL, so a feed on a SOL pool prices each sample in dollars with Pyth's SOL/USD (the
+sponsored `PriceUpdateV2` account, full verification, the feed id pinned, at most 120 s old and 1% wide, or the update
+is refused). On a second test pool, 20M TMEME against 0.8 SOL, the feed read 0.04 SOL per 1M coins at $70.96 as
+2.8385. Pumped 164% with 0.5 SOL, the price the feed held rose 1% a step and the mark 0.15% over 50 s; the pool's
+dollar price also moved with SOL between samples, which the average takes in the same way.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
   a 30-minute average, the attack again until it lost money (run 4), and an attacker who held the pump through the
   whole average (run 5).
 - The house's quoting rules move from the client into an on-chain matcher. The average has moved into `mark/` on
-  devnet; still to do there: mainnet pools are quoted in SOL, so the mark needs SOL/USD from Pyth on top of the pool,
-  readers for the older Pump coins' Raydium pools, and a keeper that calls it.
+  devnet, SOL pools priced in dollars with Pyth; still to do there: readers for Raydium's pools (CPMM, where coins
+  from Raydium's own launchpad go, and AMM v4, where older Pump coins went), and a keeper that calls it.
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap
