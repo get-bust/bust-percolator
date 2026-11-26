@@ -1,0 +1,21 @@
+[package]
+name = "bust-mark"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Marks a Percolator asset to the time-weighted average of a PumpSwap pool, read on chain"
+license-file = "../LICENSE"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "bust_mark"
+
+[features]
+no-entrypoint = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+solana-program = "1.18"
+
+[workspace]
