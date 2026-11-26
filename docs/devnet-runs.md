@@ -261,14 +261,19 @@ each against GeckoTerminal's price of the last trade:
 The readings are the pools' reserves; a last trade includes its fee and price impact, so they differ by a fraction of
 a percent.
 
+An update costs about 16,100 compute units, Percolator's `PushAuthMark` included. The keeper (`perc feed run`) asks for
+25,000 at 1,000 micro-lamports a unit: 5,025 lamports an update, 0.0434 SOL a day for one market at one update every
+10 s. A minute without an update is reported; the average then holds the last price it read.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
   a 30-minute average, the attack again until it lost money (run 4), and an attacker who held the pump through the
   whole average (run 5).
 - The house's quoting rules move from the client into an on-chain matcher. The average has moved into `mark/` on
-  devnet, SOL pools priced in dollars with Pyth; and Raydium CPMM and AMM v4 pools read; still to do there: a
-  keeper that calls it.
+  devnet, SOL pools priced in dollars with Pyth; and Raydium CPMM and AMM v4 pools read, and a keeper calls it;
+  on mainnet the keeper runs on a host of its own, with a second one that anyone can run, since an update is
+  permissionless.
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap
