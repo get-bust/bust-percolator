@@ -187,6 +187,33 @@ Both backing buckets were set to lapse after 2,000,000 slots, about nine days. R
    (`BACKING_SLOTS`), and `perc back` adds to a fresh bucket at its own expiry. On mainnet the house's backing should be
    set far out from the start rather than renewed.
 
+## Measuring the listing floor on mainnet
+
+Runs 4 and 5 assumed how a pool answers a pump. `scripts/measure-pools.cjs` reads that from real graduated Pump coins:
+GeckoTerminal's one-minute candles (the last 1,000 per pool) for PumpSwap's busiest pools by 24 h volume. A pump is a
+minute whose high is at least 10% above the lowest low of that minute and the one before; for each pump the script
+counts the minutes until the pool gives back half the rise. Minute candles cannot see inside a minute, so anything
+faster reads as one minute. Read on 2026-11-26.
+
+| pools | pumps | half back within 2 min | never half back |
+|---|---|---|---|
+| 58 of the 60 busiest, all under 10 hours old | 201 | 83 (41%) | 49 (24%) |
+| Pompom, the one other memecoin in the 60 | 79 | 59 (75%) | 0 |
+| the 8 of the 200 busiest that are at least 3 days old | 8 | 4 | 0 |
+
+Findings:
+
+8. **The busiest pools are coins hours old, and their pumps often stay.** Almost all are coins launched hours before, and a quarter of their pumps never come back inside the
+   candles read: the price has moved, not been pushed. A 30-minute average marks such a coin to the new price late but
+   correctly, and a short there loses for real. These coins are not candidates.
+9. **Older pools pump rarely and give it back.** Only 8 of the 200 busiest PumpSwap pools are three days old or more, and two of them are PUMP/USDC and USDC/SOL.
+   In about 16 hours each the older memecoins pumped 10% inside a minute 8 times in total, and every pump gave half
+   back, four within two minutes and one only after 35 minutes. A pool where a 10% jump is rare and fades is what
+   a perp on a 30-minute average can be listed on; the count is too small to set one half-life for all of them.
+
+So the floor is two checks per coin: an age and volume gate, and the coin's own pump and fade measured from its own
+candles before it is listed, with the open interest cap set from that.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
@@ -195,8 +222,8 @@ Both backing buckets were set to lapse after 2,000,000 slots, about nine days. R
 - The house's quoting rules move from the client into an on-chain matcher, and the average from the off-chain pusher
   into an adapter program that reads the pool.
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
-  of holder supply are assumptions; for each coin, how fast its pool is sold into after a jump and how much is sold
-  have to be measured from the pool's own trades before it is listed, and its open interest cap kept below what
-  absorbing that selling would cost.
+  of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
+  rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap
+  kept below what absorbing that selling would cost. How much is sold, not only how fast, still needs the pool's trades.
 - Backing set a year out from the first top-up, what happens to the positions on a side whose backing lapses anyway
   (domain 1 on devnet, at slot 527,453,036), and the house's exposure to the backing it provides.
