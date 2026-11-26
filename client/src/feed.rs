@@ -54,7 +54,8 @@ fn feed_key(st: &Value) -> Result<Pubkey> {
     Ok(feed_address(&pk(st, "market")?, 0).0)
 }
 
-/// Opens the feed for asset 0 on the pool in `state/<pool_file>`. A pool quoted in SOL is priced in dollars with
+/// Opens the feed for asset 0 on the pool in `state/<pool_file>` (a PumpSwap or Raydium CPMM pool; its file names the
+/// pool, its vaults and its quote mint). A pool quoted in SOL is priced in dollars with
 /// Pyth's SOL/USD.
 pub fn init(c: &Ctx, window: u64, interval: u64, max_step_bps: u64, pool_file: &str) -> Result<()> {
     let mut st = read_state()?;
@@ -79,7 +80,8 @@ pub fn init(c: &Ctx, window: u64, interval: u64, max_step_bps: u64, pool_file: &
     } else {
         ([0u8; 32], 6u8)
     };
-    let fields: [&[u8]; 9] = [
+    let quote_mint = pk(&pool, "quoteMint")?;
+    let fields: [&[u8]; 10] = [
         &0u16.to_le_bytes(),
         &CONTRACT_BASE_ATOMS.to_le_bytes(),
         &window.to_le_bytes(),
@@ -89,6 +91,7 @@ pub fn init(c: &Ctx, window: u64, interval: u64, max_step_bps: u64, pool_file: &
         &MAX_QUOTE_AGE_SECS.to_le_bytes(),
         &MAX_QUOTE_CONF_BPS.to_le_bytes(),
         &[decimals],
+        quote_mint.as_ref(),
     ];
     let sig = c.send(vec![ix(0, &fields, accounts)], &[&c.house])?;
     st["feedPool"] = pool_file.into();
@@ -144,6 +147,7 @@ pub fn update_ix(c: &Ctx, st: &Value) -> Result<Instruction> {
     let (market_id, seq, epoch) = sequences(c, &market)?;
     let mut accounts = vec![
         AccountMeta::new(feed, false),
+        AccountMeta::new_readonly(pk(&pool, "pool")?, false),
         AccountMeta::new_readonly(pk(&pool, "baseVault")?, false),
         AccountMeta::new_readonly(pk(&pool, "quoteVault")?, false),
         AccountMeta::new(market, false),
