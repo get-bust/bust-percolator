@@ -17,8 +17,10 @@
 //!   perc pusher <window_secs>       follow the PumpSwap pool: push its time-weighted average every 4 s
 //!   perc record <window_secs> <secs> pusher plus a crank per tick, one JSON line per tick
 //!   perc newtrader <tag>            set the current trader aside under <tag> and open a fresh one
-//!   perc feed init <window_secs> <interval_secs> <max_step_bps>
-//!                                   open the on-chain mark feed (bust-mark) on the pool in state/pool.json
+//!   perc feed init <window_secs> <interval_secs> <max_step_bps> [pool_file]
+//!                                   open the on-chain mark feed (bust-mark) on the pool in state/pool.json (or
+//!                                   state/<pool_file>; a SOL pool is priced in dollars with Pyth's SOL/USD)
+//!   perc feed close                 close the feed, its rent back to the house
 //!   perc feed take | release        the feed takes the oracle role from the house, or gives it back
 //!   perc feed update | run <secs>   one feed update, or one every <secs> seconds
 //!   perc feed show                  the feed and the asset's mark target
@@ -71,7 +73,8 @@ fn main() -> Result<()> {
         Some("convert") => trade::convert(&c, &read_state()?, usdc(&arg(1)?)?),
         Some("pusher") => mark::pusher(&c, &read_state()?, arg(1)?.parse()?),
         Some("feed") => match arg(1)?.as_str() {
-            "init" => feed::init(&c, arg(2)?.parse()?, arg(3)?.parse()?, arg(4)?.parse()?),
+            "init" => feed::init(&c, arg(2)?.parse()?, arg(3)?.parse()?, arg(4)?.parse()?, &arg(5).unwrap_or_else(|_| "pool.json".into())),
+            "close" => feed::close(&c),
             "take" => feed::take(&c),
             "release" => feed::release(&c),
             "update" => {
@@ -80,7 +83,7 @@ fn main() -> Result<()> {
             }
             "run" => feed::run(&c, arg(2)?.parse()?),
             "show" => feed::show(&c),
-            _ => bail!("feed: init | take | release | update | run | show"),
+            _ => bail!("feed: init | take | release | close | update | run | show"),
         },
         Some("record") => record::record(&c, &read_state()?, arg(1)?.parse()?, arg(2)?.parse()?),
         _ => bail!("unknown command; see the list at the top of client/src/main.rs"),

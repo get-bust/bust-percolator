@@ -4,7 +4,6 @@
 //! control sequences, which Percolator checks. The feed's oracle PDA must first take the oracle role from the house.
 
 use crate::ctx::{eng, pk, read_state, write_state, Ctx};
-use crate::mark::read_pool;
 use anyhow::{anyhow, Result};
 use bust_mark::{feed_address, observations, oracle_address, Feed};
 use percolator_prog::state;
@@ -19,6 +18,21 @@ use std::{thread, time::Duration};
 
 /// One contract is 1,000,000 coins of 6 decimals.
 const CONTRACT_BASE_ATOMS: u64 = 1_000_000_000_000;
+const WSOL: &str = "So11111111111111111111111111111111111111112";
+/// Pyth SOL/USD: its feed id and the sponsored price account, the same address on devnet and mainnet.
+const SOL_USD_FEED_ID: &str = "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
+const SOL_USD_ACCOUNT: &str = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE";
+/// A SOL price older than two minutes, or with a confidence wider than 1% of it, refuses the update.
+const MAX_QUOTE_AGE_SECS: u64 = 120;
+const MAX_QUOTE_CONF_BPS: u64 = 100;
+
+fn hex32(s: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap();
+    }
+    out
+}
 
 fn ix(tag: u8, fields: &[&[u8]], accounts: Vec<AccountMeta>) -> Instruction {
     let mut data = vec![tag];
@@ -40,10 +54,12 @@ fn feed_key(st: &Value) -> Result<Pubkey> {
     Ok(feed_address(&pk(st, "market")?, 0).0)
 }
 
-/// Opens the feed for asset 0 on the pool in state/pool.json.
-pub fn init(c: &Ctx, window: u64, interval: u64, max_step_bps: u64) -> Result<()> {
+/// Opens the feed for asset 0 on the pool in `state/<pool_file>`. A pool quoted in SOL is priced in dollars with
+/// Pyth's SOL/USD.
+pub fn init(c: &Ctx, window: u64, interval: u64, max_step_bps: u64, pool_file: &str) -> Result<()> {
     let mut st = read_state()?;
-    let pool = read_pool()?;
+    let pool = read_pool_file(pool_file)?;
+    let sol = pool["quoteMint"].as_str() == Some(WSOL);
     let market = pk(&st, "market")?;
     let (feed, _) = feed_address(&market, 0);
     let accounts = vec![
@@ -56,8 +72,26 @@ pub fn init(c: &Ctx, window: u64, interval: u64, max_step_bps: u64) -> Result<()
         AccountMeta::new_readonly(pk(&pool, "baseVault")?, false),
         AccountMeta::new_readonly(pk(&pool, "quoteVault")?, false),
     ];
-    let fields: [&[u8]; 5] = [&0u16.to_le_bytes(), &CONTRACT_BASE_ATOMS.to_le_bytes(), &window.to_le_bytes(), &interval.to_le_bytes(), &max_step_bps.to_le_bytes()];
+    let mut accounts = accounts;
+    let (feed_id, decimals) = if sol {
+        accounts.push(AccountMeta::new_readonly(SOL_USD_ACCOUNT.parse()?, false));
+        (hex32(SOL_USD_FEED_ID), 9u8)
+    } else {
+        ([0u8; 32], 6u8)
+    };
+    let fields: [&[u8]; 9] = [
+        &0u16.to_le_bytes(),
+        &CONTRACT_BASE_ATOMS.to_le_bytes(),
+        &window.to_le_bytes(),
+        &interval.to_le_bytes(),
+        &max_step_bps.to_le_bytes(),
+        &feed_id,
+        &MAX_QUOTE_AGE_SECS.to_le_bytes(),
+        &MAX_QUOTE_CONF_BPS.to_le_bytes(),
+        &[decimals],
+    ];
     let sig = c.send(vec![ix(0, &fields, accounts)], &[&c.house])?;
+    st["feedPool"] = pool_file.into();
     st["feed"] = feed.to_string().into();
     st["feedOracle"] = oracle_address(&feed).0.to_string().into();
     write_state(&st)?;
@@ -104,11 +138,11 @@ pub fn release(c: &Ctx) -> Result<()> {
 }
 
 pub fn update_ix(c: &Ctx, st: &Value) -> Result<Instruction> {
-    let pool = read_pool()?;
+    let pool = read_pool_file(st["feedPool"].as_str().unwrap_or("pool.json"))?;
     let market = pk(st, "market")?;
     let feed = feed_key(st)?;
     let (market_id, seq, epoch) = sequences(c, &market)?;
-    let accounts = vec![
+    let mut accounts = vec![
         AccountMeta::new(feed, false),
         AccountMeta::new_readonly(pk(&pool, "baseVault")?, false),
         AccountMeta::new_readonly(pk(&pool, "quoteVault")?, false),
@@ -116,7 +150,23 @@ pub fn update_ix(c: &Ctx, st: &Value) -> Result<Instruction> {
         AccountMeta::new_readonly(oracle_address(&feed).0, false),
         AccountMeta::new_readonly(c.program, false),
     ];
+    if pool["quoteMint"].as_str() == Some(WSOL) {
+        accounts.push(AccountMeta::new_readonly(SOL_USD_ACCOUNT.parse()?, false));
+    }
     Ok(ix(1, &[&market_id.to_le_bytes(), &seq.to_le_bytes(), &epoch.to_le_bytes()], accounts))
+}
+
+/// Closes the feed and returns its rent to the house. Its oracle PDA keeps the oracle role, and a feed opened again
+/// for the same asset has the same PDA.
+pub fn close(c: &Ctx) -> Result<()> {
+    let st = read_state()?;
+    let accounts = vec![AccountMeta::new(c.house.pubkey(), true), AccountMeta::new(feed_key(&st)?, false)];
+    println!("closed {}", c.send(vec![ix(5, &[], accounts)], &[&c.house])?);
+    Ok(())
+}
+
+fn read_pool_file(name: &str) -> Result<Value> {
+    Ok(serde_json::from_str(&std::fs::read_to_string(crate::ctx::root().join("state").join(name))?)?)
 }
 
 /// One update: the feed reads the pool, adds an observation and pushes the average.
@@ -157,6 +207,7 @@ pub fn show(c: &Ctx) -> Result<()> {
     let obs = observations(&data, &feed);
     let newest = obs.last().copied();
     println!("feed {key}");
+    println!("  quoted in {}", if feed.quote_feed == Pubkey::default() { "the collateral".to_string() } else { format!("SOL, priced by {}", feed.quote_feed) });
     println!("  pool {}  window {} s  interval {} s  max step {} bps", feed.pool, feed.window_secs, feed.min_interval_secs, feed.max_step_bps);
     println!("  held price {:.4}  observations {}  newest at {:?}", feed.last_price as f64 / 1e6, obs.len(), newest.map(|o| o.ts));
     let (_, target) = read(c)?;
