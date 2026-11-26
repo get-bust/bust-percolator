@@ -5,6 +5,7 @@
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "@pump-fun/pump-swap-sdk": "2.1.0",
+    "@raydium-io/raydium-sdk-v2": "0.2.84-alpha",
     "@solana/spl-token": "0.4.15",
     "@solana/web3.js": "1.99.0",
     "bn.js": "5.2.5"
