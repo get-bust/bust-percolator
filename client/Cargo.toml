@@ -7,6 +7,7 @@ description = "Devnet client for Bust markets on Percolator"
 license-file = "../LICENSE"
 
 [dependencies]
+bust-mark = { path = "../mark", features = ["no-entrypoint"] }
 percolator-prog = { path = "../percolator-prog", features = ["no-entrypoint"] }
 solana-client = "1.18"
 solana-sdk = "1.18"

@@ -664,6 +664,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
 
 [[package]]
+name = "bust-mark"
+version = "0.1.0"
+dependencies = [
+ "solana-program 1.18.26",
+]
+
+[[package]]
 name = "bv"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2543,6 +2550,7 @@ name = "perc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bust-mark",
  "percolator-prog",
  "serde_json",
  "solana-client",
