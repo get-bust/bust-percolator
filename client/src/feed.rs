@@ -173,21 +173,38 @@ fn read_pool_file(name: &str) -> Result<Value> {
     Ok(serde_json::from_str(&std::fs::read_to_string(crate::ctx::root().join("state").join(name))?)?)
 }
 
+/// An update uses about 16,100 compute units, Percolator's PushAuthMark included; the keeper asks for a little more.
+const UPDATE_UNITS: u32 = 25_000;
+
 /// One update: the feed reads the pool, adds an observation and pushes the average.
 pub fn update(c: &Ctx) -> Result<String> {
     let st = read_state()?;
     c.send(vec![update_ix(c, &st)?], &[&c.house])
 }
 
-/// Calls the feed every `secs` seconds. A call the program refuses as too soon is skipped.
-pub fn run(c: &Ctx, secs: u64) -> Result<()> {
+/// The keeper: calls the feed every `secs` seconds with a compute budget sized to the update, at `micro_lamports` a
+/// unit. A call refused as too soon is skipped; a stretch of a minute without an update is reported, since the
+/// average then holds the last price and Percolator's staleness rules start to count.
+pub fn run(c: &Ctx, secs: u64, micro_lamports: u64) -> Result<()> {
+    let fee = 5_000 + UPDATE_UNITS as u64 * micro_lamports / 1_000_000;
+    println!("an update every {secs} s at {fee} lamports: {:.4} SOL a day", fee as f64 * 86_400.0 / secs as f64 / 1e9);
+    let mut last_ok = std::time::Instant::now();
     loop {
-        match update(c) {
+        let sent = read_state().and_then(|st| update_ix(c, &st)).and_then(|ix| c.send_with_budget(vec![ix], &[&c.house], UPDATE_UNITS, micro_lamports));
+        match sent {
             Ok(sig) => {
+                last_ok = std::time::Instant::now();
                 let (feed, target) = read(c)?;
                 println!("pool {:.4} mark {:.4} {}", feed.last_price as f64 / 1e6, target as f64 / 1e6, &sig[..12]);
             }
-            Err(e) => println!("update failed: {}", e.to_string().lines().find(|l| l.contains("Custom") || l.contains("Error")).unwrap_or("?")),
+            Err(e) => {
+                let why = e.to_string();
+                let why = why.lines().find(|l| l.contains("custom program error") || l.contains("Error")).unwrap_or("?").trim().to_string();
+                println!("update failed: {why}");
+                if last_ok.elapsed() > Duration::from_secs(60) {
+                    println!("no update for {} s", last_ok.elapsed().as_secs());
+                }
+            }
         }
         thread::sleep(Duration::from_secs(secs));
     }

@@ -101,9 +101,15 @@ impl Ctx {
 
     /// Sends and confirms one transaction; the first signer pays. A signer passed twice signs once.
     pub fn send(&self, ixs: Vec<Instruction>, signers: &[&Keypair]) -> Result<String> {
+        self.send_with_budget(ixs, signers, 1_400_000, 20_000)
+    }
+
+    /// `send` with a compute unit limit and price of its own: the fee is 5,000 lamports a signature plus the limit
+    /// times the price in micro-lamports.
+    pub fn send_with_budget(&self, ixs: Vec<Instruction>, signers: &[&Keypair], units: u32, micro_lamports: u64) -> Result<String> {
         let mut all = vec![
-            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
-            ComputeBudgetInstruction::set_compute_unit_price(20_000),
+            ComputeBudgetInstruction::set_compute_unit_limit(units),
+            ComputeBudgetInstruction::set_compute_unit_price(micro_lamports),
         ];
         all.extend(ixs);
         let mut unique: Vec<&Keypair> = Vec::new();

@@ -22,7 +22,10 @@
 //!                                   state/<pool_file>; a SOL pool is priced in dollars with Pyth's SOL/USD)
 //!   perc feed close                 close the feed, its rent back to the house
 //!   perc feed take | release        the feed takes the oracle role from the house, or gives it back
-//!   perc feed update | run <secs>   one feed update, or one every <secs> seconds
+//!   perc feed update                one feed update
+//!   perc feed run <secs> [micro_lamports]
+//!                                   the keeper: an update every <secs> seconds, priced at [micro_lamports] a
+//!                                   compute unit (default 1,000)
 //!   perc feed show                  the feed and the asset's mark target
 //!   perc probe <rpc> <pool> <quote_mint>
 //!                                   read any cluster's pool with the feed's layouts: reserves and price
@@ -86,7 +89,7 @@ fn main() -> Result<()> {
                 println!("{}", feed::update(&c)?);
                 feed::show(&c)
             }
-            "run" => feed::run(&c, arg(2)?.parse()?),
+            "run" => feed::run(&c, arg(2)?.parse()?, arg(3).map(|a| a.parse()).unwrap_or(Ok(1_000))?),
             "show" => feed::show(&c),
             _ => bail!("feed: init | take | release | close | update | run | show"),
         },
