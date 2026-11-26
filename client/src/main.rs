@@ -24,6 +24,8 @@
 //!   perc feed take | release        the feed takes the oracle role from the house, or gives it back
 //!   perc feed update | run <secs>   one feed update, or one every <secs> seconds
 //!   perc feed show                  the feed and the asset's mark target
+//!   perc probe <rpc> <pool> <quote_mint>
+//!                                   read any cluster's pool with the feed's layouts: reserves and price
 //!
 //! Configuration: devnet.json (RPC, program id, collateral mint). Keys: HOUSE_KEYPAIR (default
 //! ~/.config/solana/id.json), MINT_AUTHORITY_KEYPAIR (the collateral mint's authority, default the house), and
@@ -49,6 +51,9 @@ fn main() -> Result<()> {
     let arg = |i: usize| args.get(i).cloned().ok_or_else(|| anyhow!("missing argument {i}"));
     if args.first().map(String::as_str) == Some("newtrader") {
         return record::new_trader(&arg(1)?);
+    }
+    if args.first().map(String::as_str) == Some("probe") {
+        return feed::probe(&arg(1)?, &arg(2)?, &arg(3)?);
     }
     let c = Ctx::new()?;
     match args.first().map(String::as_str) {

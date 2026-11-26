@@ -218,3 +218,26 @@ pub fn show(c: &Ctx) -> Result<()> {
     println!("  asset 0 mark target {:.4}", target as f64 / 1e6);
     Ok(())
 }
+
+/// Reads a pool with the feed program's own layouts, against any cluster's RPC: its kind, vaults, reserves and the
+/// price of its coin in the quote token. Checks a pool before a feed is opened on it.
+pub fn probe(rpc: &str, pool: &str, quote_mint: &str) -> Result<()> {
+    use solana_client::rpc_client::RpcClient;
+    let rpc = RpcClient::new(rpc.to_string());
+    let pool: Pubkey = pool.parse()?;
+    let quote_mint: Pubkey = quote_mint.parse()?;
+    let account = rpc.get_account(&pool)?;
+    let kind = bust_mark::pools::kind_of(&account.owner).ok_or_else(|| anyhow!("{} is not a pool the feed reads", account.owner))?;
+    let (base_vault, quote_vault, side) = bust_mark::pools::vaults(kind, &account.data, &quote_mint).ok_or_else(|| anyhow!("the pool does not hold {quote_mint}"))?;
+    let amount = |k: &Pubkey| -> Result<(u64, u8)> {
+        let b = rpc.get_token_account_balance(k)?;
+        Ok((b.amount.parse()?, b.decimals))
+    };
+    let ((base, base_dec), (quote, quote_dec)) = (amount(&base_vault)?, amount(&quote_vault)?);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let (rb, rq) = bust_mark::pools::reserves(kind, &account.data, side, base, quote, now).ok_or_else(|| anyhow!("the pool is not open for swaps"))?;
+    println!("kind {kind} base side {side} base vault {base_vault} quote vault {quote_vault}");
+    println!("vaults {base} / {quote}, reserves {rb} / {rq}");
+    println!("price {:.10} quote per coin", (rq as f64 / 10f64.powi(quote_dec as i32)) / (rb as f64 / 10f64.powi(base_dec as i32)));
+    Ok(())
+}
