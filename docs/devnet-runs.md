@@ -247,14 +247,28 @@ as each vault less those fees, as Raydium's `vault_amount_without_fee` does; rea
 0.0010516 SOL a coin against GeckoTerminal's 0.0010493 from the last trade. On a devnet CPMM pool, 20M TMEME against
 0.8 SOL, a 161% pump moved the price the feed held 1% a step and the mark 0.18% over 50 s, as on PumpSwap.
 
+Raydium AMM v4 pools, where older Pump coins went, need an OpenBook market to be opened, so that reader was checked on
+mainnet instead: `perc probe` reads any cluster's pool with the feed program's own layout code. Read on 2026-11-26,
+each against GeckoTerminal's price of the last trade:
+
+| pool | kind | feed's reading (SOL a coin) | GeckoTerminal |
+|---|---|---|---|
+| pippin/SOL `8WwcNqdZ…` | AMM v4, coin on the pc side | 0.0002559958 | 0.0002566261 |
+| VINE/SOL `58fzJMbX…` | AMM v4 | 0.0001302146 | 0.0001300168 |
+| USELESS/SOL `Q2sPHPdU…` | CPMM | 0.0010427929 | 0.0010403896 |
+| FIONA/SOL `DjbLtX1H…` | PumpSwap | 0.0000270648 | 0.0000272591 |
+
+The readings are the pools' reserves; a last trade includes its fee and price impact, so they differ by a fraction of
+a percent.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
   a 30-minute average, the attack again until it lost money (run 4), and an attacker who held the pump through the
   whole average (run 5).
 - The house's quoting rules move from the client into an on-chain matcher. The average has moved into `mark/` on
-  devnet, SOL pools priced in dollars with Pyth; and Raydium CPMM pools read; still to do there: a reader for
-  Raydium AMM v4, where older Pump coins went, and a keeper that calls it.
+  devnet, SOL pools priced in dollars with Pyth; and Raydium CPMM and AMM v4 pools read; still to do there: a
+  keeper that calls it.
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap

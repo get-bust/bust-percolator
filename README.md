@@ -55,7 +55,7 @@ creates to `keys/` and the addresses of the market to `state/perc.json`; neither
 
 ## The mark feed
 
-`mark/` is a small program of our own that marks an asset to its pool, a PumpSwap or Raydium CPMM pool. Its feed
+`mark/` is a small program of our own that marks an asset to its pool: PumpSwap, Raydium CPMM or Raydium AMM v4. Its feed
 account holds the pool's two vaults, read from the pool account when the feed is made, and a ring of observations. Anyone may call `Update` once
 the interval has passed: the program reads both vaults, adds an observation and pushes the pool's time-weighted average
 to Percolator as the asset's authority mark, signed by the feed's oracle PDA. The caller picks only the moment, never
@@ -68,6 +68,7 @@ client/target/release/perc feed init 1800 10 100   # 30-minute average, an updat
                                                    # (add pool-sol.json for the SOL pool of scripts/pool.cjs setup-sol)
 client/target/release/perc feed take               # the feed's PDA takes the oracle role from the house
 client/target/release/perc feed run 10             # call it every 10 s (perc feed release gives the role back)
+client/target/release/perc probe <rpc> <pool> <quote_mint>   # read any cluster's pool with the feed's layouts
 ```
 
 ## Scripts
