@@ -8,6 +8,7 @@ license-file = "../LICENSE"
 
 [dependencies]
 bust-mark = { path = "../mark", features = ["no-entrypoint"] }
+bust-matcher = { path = "../matcher", features = ["no-entrypoint"] }
 percolator-prog = { path = "../percolator-prog", features = ["no-entrypoint"] }
 solana-client = "1.18"
 solana-sdk = "1.18"

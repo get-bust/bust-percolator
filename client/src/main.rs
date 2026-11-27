@@ -27,6 +27,15 @@
 //!                                   the keeper: an update every <secs> seconds, priced at [micro_lamports] a
 //!                                   compute unit (default 1,000)
 //!   perc feed show                  the feed and the asset's mark target
+//!   perc matcher init <oi_cap_bps> <max_gap_bps>
+//!                                   open the on-chain matcher's context for the house portfolio and enable it there
+//!   perc matcher params <oi_cap_bps> <max_gap_bps>
+//!                                   change the house's rules
+//!   perc matcher trade <contracts> [update]
+//!                                   the trader trades through the matcher, signing alone ([update]: a feed update
+//!                                   first, in the same transaction)
+//!   perc matcher show               the context and its last snapshot
+//!   perc matcher attack             simulate the ways around the snapshot; each must be refused
 //!   perc probe <rpc> <pool> <quote_mint>
 //!                                   read any cluster's pool with the feed's layouts: reserves and price
 //!
@@ -38,6 +47,7 @@ mod ctx;
 mod feed;
 mod market;
 mod mark;
+mod matcher;
 mod trade;
 mod record;
 
@@ -92,6 +102,14 @@ fn main() -> Result<()> {
             "run" => feed::run(&c, arg(2)?.parse()?, arg(3).map(|a| a.parse()).unwrap_or(Ok(1_000))?),
             "show" => feed::show(&c),
             _ => bail!("feed: init | take | release | close | update | run | show"),
+        },
+        Some("matcher") => match arg(1)?.as_str() {
+            "init" => matcher::init(&c, arg(2)?.parse()?, arg(3)?.parse()?),
+            "params" => matcher::params(&c, arg(2)?.parse()?, arg(3)?.parse()?),
+            "trade" => matcher::trade(&c, arg(2)?.parse()?, arg(3).is_ok_and(|a| a == "update")),
+            "show" => matcher::show_context(&c),
+            "attack" => matcher::attack(&c),
+            _ => bail!("matcher: init | params | trade | show | attack"),
         },
         Some("record") => record::record(&c, &read_state()?, arg(1)?.parse()?, arg(2)?.parse()?),
         _ => bail!("unknown command; see the list at the top of client/src/main.rs"),
