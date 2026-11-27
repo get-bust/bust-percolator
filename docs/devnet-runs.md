@@ -315,6 +315,30 @@ units, a third of the limit.
 A program that calls `TradeCpi` itself is refused by the same check (the running top-level instruction must be
 Percolator's), but was not tried on chain.
 
+An open the matcher refuses for the gap can still be bought from the house: `perc order` quotes a paid entry, a
+`TradeNoCpi` the house co-signs with the gap as its fee (plus the market's base fee), so the trader enters as if at
+the pool's price, and the trader caps the fee it takes. With the matcher's gap limit set to the base fee (0 on
+devnet) and the pool 0.53% above the mark:
+
+| order | went | fee |
+|---|---|---|
+| long 1, accepting no fee | matcher refused for the gap; the house quoted 69 bps; not sent | |
+| long 1, accepting 100 bps | paid entry, [tx](https://explorer.solana.com/tx/3Nn28rp6jeo3gtXhUnhb2qFyARvpguuKC5BRfSQjzobbog9XUgCR851yxYoVdNRdWn46iS6CeK7RhyQeS3HLCoaf?cluster=devnet) | 53 bps, 0.0151 USDC |
+| short 1 (the close) | the matcher, the trader alone, [tx](https://explorer.solana.com/tx/2sJyE7CTdzyrf9MYEygUNtSp5zKdH8ghDhdqqaALwXbBTyCBRKiG763SfrSb6SSJpVKdijGXEb5UFWPzWM4hbQMK?cluster=devnet) | none |
+
+Percolator charges the fee to both accounts and puts both into the asset's insurance, which the house funds: the
+trader's share is what the house earns, its own share moves from its capital to its insurance.
+
+14. **A trade the house signs revokes its matcher.** Percolator counts a `TradeNoCpi` on the house portfolio as a
+    change of position outside the matcher and disables the matcher on it until the owner enables it again; the
+    first paid entry left the trader's long impossible to close through the matcher. A trade the house signs now
+    carries `SetMatcherConfig` right after it, in the same transaction. It also means the key that signs paid
+    entries is the house portfolio's owner, the key that can withdraw its capital: on mainnet the paid entries
+    belong on a house portfolio of their own, with an owner key of its own and only the capital they need.
+15. **The fee ceiling is fixed when the market is opened.** Percolator refuses a trade whose fee is above the market's
+    `max_trading_fee_bps`, and no instruction changes it afterwards. On the devnet market it is 1%, so a paid entry
+    can cover a gap of 1% at most there; a mainnet market's ceiling is chosen at its opening with this in mind.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
@@ -323,8 +347,9 @@ Percolator's), but was not tried on chain.
 - The house's quoting rules are on chain on devnet (`matcher/`), and so is the average (`mark/`), SOL pools priced in
   dollars with Pyth, Raydium CPMM and AMM v4 pools read, and a keeper calls it; on mainnet the keeper runs on a host
   of its own, with a second one that anyone can run, since an update is permissionless, and a trader can update in
-  its own transaction. Left: the co-signed entry past the gap limit with the gap as its fee, and more than one house
-  portfolio so that trades do not wait for each other (finding 13).
+  its own transaction, and an open past the gap limit is a paid entry the house co-signs. Left: more than one house
+  portfolio, so that trades do not wait for each other (finding 13) and paid entries are signed by a key that holds
+  only their capital (finding 14), and each market's fee ceiling (finding 15).
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap

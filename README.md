@@ -95,7 +95,14 @@ cd matcher && cargo test && cargo-build-sbf && cd ..
 client/target/release/perc matcher init 500 100     # the house: open interest up to 5% of the pool, a 1% gap limit
 client/target/release/perc matcher trade -2         # the trader alone; add `update` for a feed update in the same transaction
 client/target/release/perc matcher attack           # simulate the ways around the snapshot; each is refused
+client/target/release/perc order 1 100              # the app's path: the matcher, then a paid entry of at most 100 bps
 ```
+
+`perc order` places an order the way the app does. If the matcher refuses an open because the pool has run past the
+mark, the house quotes a paid entry (`rules::paid_entry`): it co-signs a `TradeNoCpi` that carries the gap as its fee,
+so the trader enters as if at the pool's price, and the trader caps the fee it accepts. Percolator revokes the
+matcher on a house portfolio whenever that portfolio trades outside it, so a trade the house signs enables the matcher
+again in the same transaction.
 
 ## Scripts
 
