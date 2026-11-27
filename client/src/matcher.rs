@@ -66,13 +66,26 @@ pub fn init(c: &Ctx, oi_cap_bps: u64, max_gap_bps: u64) -> Result<()> {
     }
 
     let hd = c.data(&house)?;
-    let md = c.data(&market)?;
-    let (_, frontier) = eng(state::read_asset_lifecycle_generation_preflight(&md, 0, true))?;
-    let enable = c.prog(
+    let enable = enable_ix(c, &st, eng(state::read_portfolio_position_epoch(&hd))?, eng(state::read_portfolio_matcher_sequence(&hd))?)?;
+    println!("matcher enabled on the house portfolio: {}", c.send(vec![enable], &[&c.house])?);
+    st["matcherCtx"] = ctx.to_string().into();
+    st["matcherDelegate"] = delegate.to_string().into();
+    write_state(&st)?;
+    show_context(c)
+}
+
+/// Enables the matcher on the house portfolio, with no expiry, for the portfolio at `position_epoch` and
+/// `expected_sequence`. Percolator revokes it whenever the portfolio's position changes outside the matcher (a trade
+/// the house signs, a liquidation), so a trade the house signs carries this right after it.
+pub fn enable_ix(c: &Ctx, st: &Value, position_epoch: u64, expected_sequence: u64) -> Result<Instruction> {
+    let (market, house) = (pk(st, "market")?, pk(st, "housePortfolio")?);
+    let ctx = context_key(c, st)?;
+    let (_, frontier) = eng(state::read_asset_lifecycle_generation_preflight(&c.data(&market)?, 0, true))?;
+    Ok(c.prog(
         Ix::SetMatcherConfig {
-            portfolio_id: eng(state::read_portfolio_id(&hd))?,
-            expected_sequence: eng(state::read_portfolio_matcher_sequence(&hd))?,
-            position_epoch: eng(state::read_portfolio_position_epoch(&hd))?,
+            portfolio_id: eng(state::read_portfolio_id(&c.data(&house)?))?,
+            expected_sequence,
+            position_epoch,
             asset_generation_frontier: frontier,
             enabled: 1,
             trade_fee_cap_bps: TRADE_FEE_CAP_BPS,
@@ -84,14 +97,9 @@ pub fn init(c: &Ctx, oi_cap_bps: u64, max_gap_bps: u64) -> Result<()> {
             AccountMeta::new(house, false),
             AccountMeta::new_readonly(bust_matcher::ID, false),
             AccountMeta::new_readonly(ctx, false),
-            AccountMeta::new_readonly(delegate, false),
+            AccountMeta::new_readonly(delegate_address(&c.program, &market, &house, &c.house.pubkey(), &ctx), false),
         ],
-    );
-    println!("matcher enabled on the house portfolio: {}", c.send(vec![enable], &[&c.house])?);
-    st["matcherCtx"] = ctx.to_string().into();
-    st["matcherDelegate"] = delegate.to_string().into();
-    write_state(&st)?;
-    show_context(c)
+    ))
 }
 
 /// Changes the house's rules.
@@ -172,18 +180,39 @@ pub fn trade_ixs(c: &Ctx, st: &Value, trader: &Pubkey, trader_portfolio: Pubkey,
     Ok(ixs)
 }
 
-/// What a transaction would use, from a simulation: compute units, or the error and the last log lines.
-fn simulate(c: &Ctx, ixs: &[Instruction], payer: &Keypair) -> Result<u64> {
+/// A simulated transaction: the compute units and logs it used, or where and why it failed.
+pub enum Sim {
+    Passed { units: u64, logs: Vec<String> },
+    Failed { error: String, logs: Vec<String> },
+}
+
+pub fn simulate(c: &Ctx, ixs: &[Instruction], payer: &Keypair) -> Result<Sim> {
     let mut all = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)];
     all.extend_from_slice(ixs);
     let tx = Transaction::new_signed_with_payer(&all, Some(&payer.pubkey()), &[payer], c.rpc.get_latest_blockhash()?);
     let sim = c.rpc.simulate_transaction(&tx)?.value;
-    if let Some(err) = sim.err {
-        let logs = sim.logs.unwrap_or_default();
-        let tail: Vec<&String> = logs.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
-        bail!("the trade would fail: {err:?}\n{}", tail.iter().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"));
+    let logs = sim.logs.unwrap_or_default();
+    Ok(match sim.err {
+        None => Sim::Passed { units: sim.units_consumed.unwrap_or(0), logs },
+        Some(err) => {
+            Sim::Failed { error: format!("{err:?}"), logs }
+        }
+    })
+}
+
+/// The matcher's own log of a fill: "filled <size> of <request> at <mark>".
+pub fn filled_in(logs: &[String]) -> Option<i128> {
+    logs.iter().find_map(|l| l.strip_prefix("Program log: filled ")?.split(' ').next()?.parse().ok())
+}
+
+fn simulate_or_bail(c: &Ctx, ixs: &[Instruction], payer: &Keypair) -> Result<u64> {
+    match simulate(c, ixs, payer)? {
+        Sim::Passed { units, .. } => Ok(units),
+        Sim::Failed { error, logs, .. } => {
+            let tail: Vec<&String> = logs.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
+            bail!("the trade would fail: {error}\n{}", tail.iter().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"))
+        }
     }
-    Ok(sim.units_consumed.unwrap_or(0))
 }
 
 /// The trader trades `contracts` against the house through the matcher (positive: long), signing alone.
@@ -192,7 +221,7 @@ pub fn trade(c: &Ctx, contracts: f64, with_update: bool) -> Result<()> {
     let size_q = (contracts * POS_SCALE).round() as i128;
     let ixs = trade_ixs(c, &st, &c.trader.pubkey(), pk(&st, "traderPortfolio")?, size_q, with_update)?;
     // the limit is what a simulation used and a fifth more: a close that settles costs more than an open
-    let units = simulate(c, &ixs, &c.trader)?;
+    let units = simulate_or_bail(c, &ixs, &c.trader)?;
     let limit = (units * 6 / 5).min(1_400_000) as u32;
     let sig = c.send_with_budget(ixs, &[&c.trader], limit, 1_000)?;
     println!("matcher trade {contracts} contracts, {units} compute units: {sig}");
@@ -236,7 +265,7 @@ pub fn attack(c: &Ctx) -> Result<()> {
     cases.push(("Prepare on another portfolio than the trade's", other));
 
     for (name, ixs) in cases {
-        match simulate(c, &ixs, &c.trader) {
+        match simulate_or_bail(c, &ixs, &c.trader) {
             Ok(units) => println!("{name}: PASSES ({units} compute units)"),
             Err(e) => println!("{name}: refused, {}", e.to_string().lines().next().unwrap_or("")),
         }

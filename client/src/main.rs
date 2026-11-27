@@ -11,7 +11,8 @@
 //!   perc renew                      move each side's backing to a far expiry (only with no claims on it)
 //!   perc push <mark_e6>             push one authority mark
 //!   perc crank <trader|house|key>   permissionless crank of one portfolio (key: a portfolio in the state file)
-//!   perc trade <contracts>          the trader against the house at the effective mark (positive: long)
+//!   perc trade <contracts>          the trader against the house at the effective mark (positive: long), both
+//!                                   signing, priced against state/pool.json: the path the recorded runs use
 //!   perc withdraw <usdc>            the trader withdraws collateral
 //!   perc convert <usdc>             the trader converts released profit into capital
 //!   perc pusher <window_secs>       follow the PumpSwap pool: push its time-weighted average every 4 s
@@ -36,6 +37,10 @@
 //!                                   first, in the same transaction)
 //!   perc matcher show               the context and its last snapshot
 //!   perc matcher attack             simulate the ways around the snapshot; each must be refused
+//!   perc order <contracts> [max_fee_bps]
+//!                                   an order as the app places it: through the matcher, and if it refuses an open
+//!                                   for the gap, a paid entry the house co-signs at a fee of up to [max_fee_bps]
+//!                                   (default 0: never pay)
 //!   perc probe <rpc> <pool> <quote_mint>
 //!                                   read any cluster's pool with the feed's layouts: reserves and price
 //!
@@ -48,6 +53,7 @@ mod feed;
 mod market;
 mod mark;
 mod matcher;
+mod order;
 mod trade;
 mod record;
 
@@ -111,6 +117,7 @@ fn main() -> Result<()> {
             "attack" => matcher::attack(&c),
             _ => bail!("matcher: init | params | trade | show | attack"),
         },
+        Some("order") => order::order(&c, arg(1)?.parse()?, arg(2).map(|a| a.parse()).unwrap_or(Ok(0))?),
         Some("record") => record::record(&c, &read_state()?, arg(1)?.parse()?, arg(2)?.parse()?),
         _ => bail!("unknown command; see the list at the top of client/src/main.rs"),
     }
