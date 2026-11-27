@@ -63,7 +63,8 @@
 //!                                   read any cluster's pool with the feed's layouts: reserves and price
 //!
 //! Configuration: devnet.json (RPC, program id, collateral mint). Keys: HOUSE_KEYPAIR (default
-//! ~/.config/solana/id.json), MINT_AUTHORITY_KEYPAIR (the collateral mint's authority, default the house), and
+//! ~/.config/solana/id.json), MINT_AUTHORITY_KEYPAIR (the collateral mint's authority, default the house),
+//! KEEPER_KEYPAIR (the keeper's hot key, default keys/keeper.json), and
 //! keys/ for the market, portfolio and trader keypairs this client creates. Run state: state/perc.json.
 
 mod ctx;
@@ -151,7 +152,7 @@ fn main() -> Result<()> {
             "params" => matcher::params(&c, arg(2)?.parse()?, arg(3)?.parse()?, arg(4)?.parse()?, arg(5)?.parse()?),
             "observe" => {
                 let st = read_state()?;
-                println!("{}", c.send(matcher::observe_ixs(&c, &st)?, &[&c.house])?);
+                println!("{}", c.send(matcher::observe_ixs(&c, &st)?, &[&c.keeper])?);
                 matcher::show_context(&c)
             }
             "shards" => matcher::add_shards(&c, arg(2)?.parse()?, arg(3)?.parse()?),

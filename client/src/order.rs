@@ -21,6 +21,8 @@ use bust_matcher::{
 use serde_json::Value;
 use solana_sdk::{pubkey::Pubkey, signature::Signer};
 
+/// Rounds over the house portfolios an order makes before giving up, 0.8 s apart.
+const RETRY_ROUNDS: u32 = 4;
 /// The fee is sized for a price this much worse than the one read, in basis points of the gap.
 const FEE_ROOM_BPS: u128 = 200;
 
@@ -111,7 +113,16 @@ pub fn order(c: &Ctx, contracts: f64, max_fee_bps: u64) -> Result<()> {
     let all = shards(&st)?;
     let houses = crate::matcher::shards_for(c, &st, size_q)?;
     let mut last = String::new();
-    for house in houses.iter() {
+    // for a few seconds after each mark Percolator refuses a trade that adds risk while the keeper settles the
+    // market: the order goes round the house portfolios again after a pause, as the app does
+    let rounds = (0..RETRY_ROUNDS).flat_map(|r| houses.iter().map(move |h| (r, h)));
+    let mut current = 0;
+    for (round, house) in rounds {
+        // every way out of this loop but a failure breaks it, so a new round means the last one failed throughout
+        if round != current {
+            current = round;
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        }
         let index = all.iter().position(|h| h == house).unwrap_or(0);
         let ixs = trade_ixs(c, &st, &trader, portfolio, *house, size_q, false, pay)?;
         match simulate(c, &ixs, &c.trader)? {
@@ -128,7 +139,7 @@ pub fn order(c: &Ctx, contracts: f64, max_fee_bps: u64) -> Result<()> {
                         last.clear();
                         break;
                     }
-                    Err(e) => last = e.to_string().lines().next().unwrap_or("").to_string(),
+                    Err(e) => last = crate::ctx::brief(&e),
                 }
             }
             Sim::Failed { error, logs } => {

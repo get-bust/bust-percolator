@@ -174,6 +174,9 @@ fn read_pool_file(name: &str) -> Result<Value> {
 }
 
 
+/// Below this the keeper is topped up (devnet) or reported (elsewhere), and by how much.
+const KEEPER_LOW_LAMPORTS: u64 = 50_000_000;
+const KEEPER_TOP_UP_LAMPORTS: u64 = 200_000_000;
 /// Cranks an update carries at most to move the price to the new mark; settling sends the rest.
 const MAX_UPDATE_CRANKS: usize = 8;
 
@@ -191,9 +194,24 @@ pub fn update(c: &Ctx) -> Result<String> {
 /// without an update is reported.
 pub fn run(c: &Ctx, secs: u64, micro_lamports: u64, check_secs: u64) -> Result<()> {
     println!("an update every {secs} s, the market settled after each one and checked every {check_secs} s");
+    println!("keeper {}", c.keeper.pubkey());
     let mut last_ok = std::time::Instant::now();
     let mut next_update = std::time::Instant::now();
     loop {
+        // on devnet the house tops the keeper up; on mainnet the keeper is funded on its own and this only reports
+        if let Ok(balance) = c.rpc.get_balance(&c.keeper.pubkey()) {
+            if balance < KEEPER_LOW_LAMPORTS {
+                if c.rpc.url().contains("devnet") {
+                    let top_up = solana_sdk::system_instruction::transfer(&c.house.pubkey(), &c.keeper.pubkey(), KEEPER_TOP_UP_LAMPORTS);
+                    match c.send(vec![top_up], &[&c.house]) {
+                        Ok(_) => println!("keeper topped up with {} SOL", KEEPER_TOP_UP_LAMPORTS as f64 / 1e9),
+                        Err(e) => println!("keeper top-up: {}", crate::ctx::brief(&e)),
+                    }
+                } else {
+                    println!("keeper low: {} SOL", balance as f64 / 1e9);
+                }
+            }
+        }
         if std::time::Instant::now() >= next_update {
             next_update = std::time::Instant::now() + Duration::from_secs(secs);
             // the new mark, then cranks that accrue the asset since its last accrual and so move the price to the
@@ -206,7 +224,7 @@ pub fn run(c: &Ctx, secs: u64, micro_lamports: u64, check_secs: u64) -> Result<(
                 }
                 // the crank that moves the price costs more than the rest, by how much is not known beforehand: the
                 // update takes a transaction's whole budget
-                c.send_with_budget(ixs, &[&c.house], 1_400_000, micro_lamports)
+                c.send_with_budget(ixs, &[&c.keeper], 1_400_000, micro_lamports)
             });
             match sent {
                 Ok(sig) => {

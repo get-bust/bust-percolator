@@ -189,7 +189,7 @@ pub struct Settled {
 }
 
 fn settle_send(c: &Ctx, ixs: Vec<Instruction>, units: u32, micro_lamports: u64, out: &mut Settled) {
-    match c.send_with_budget(ixs, &[&c.house], units, micro_lamports) {
+    match c.send_with_budget(ixs, &[&c.keeper], units, micro_lamports) {
         Ok(_) => out.ok += 1,
         Err(e) if e.to_string().split_whitespace().collect::<String>().contains("Custom(22)") => out.idle += 1,
         Err(e) => {
@@ -209,7 +209,7 @@ pub fn accrual_ixs(c: &Ctx, st: &Value, cap: usize) -> Result<Vec<Instruction>> 
     let n = (behind.div_ceil(dt) as usize).min(cap);
     let slot = c.rpc.get_slot()?;
     // the slot field is not read on chain; varying it keeps identical cranks in one transaction apart
-    Ok((0..n as u64).map(|k| crank_ix(c, &c.house.pubkey(), market, house, slot + k)).collect())
+    Ok((0..n as u64).map(|k| crank_ix(c, &c.keeper.pubkey(), market, house, slot + k)).collect())
 }
 
 /// Holders cranked in one transaction, at about 129,000 compute units each after a price move (measured on devnet).
@@ -231,7 +231,7 @@ fn send_together(c: &Ctx, txs: Vec<Vec<Instruction>>, units: u32, micro_lamports
     for ixs in &txs {
         let mut all = vec![ComputeBudgetInstruction::set_compute_unit_limit(units), ComputeBudgetInstruction::set_compute_unit_price(micro_lamports)];
         all.extend(ixs.iter().cloned());
-        let tx = Transaction::new_signed_with_payer(&all, Some(&c.house.pubkey()), &[&c.house], blockhash);
+        let tx = Transaction::new_signed_with_payer(&all, Some(&c.keeper.pubkey()), &[&c.keeper], blockhash);
         sigs.push(c.rpc.send_transaction_with_config(&tx, config)?);
     }
     let started = std::time::Instant::now();
@@ -290,7 +290,7 @@ pub fn settle(c: &Ctx, st: &Value, micro_lamports: u64) -> Result<Settled> {
     }
     let slot = c.rpc.get_slot()?;
     // a holder's crank after a price move settles its profit and loss: more than a plain crank, so the whole budget
-    let cranks: Vec<Instruction> = stale_holders(c, st)?.into_iter().map(|h| crank_ix(c, &c.house.pubkey(), market, h, slot)).collect();
+    let cranks: Vec<Instruction> = stale_holders(c, st)?.into_iter().map(|h| crank_ix(c, &c.keeper.pubkey(), market, h, slot)).collect();
     let batches = cranks.chunks(HOLDERS_PER_TX).map(|b| b.to_vec()).collect();
     let refused = send_together(c, batches, 1_400_000, micro_lamports, &mut out)?;
     // a batch with one holder already settled is refused whole: those holders one by one

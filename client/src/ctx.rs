@@ -96,6 +96,10 @@ pub struct Ctx {
     /// Market authority, oracle authority, LP counterparty and fee payer.
     pub house: Keypair,
     pub trader: Keypair,
+    /// The keeper: updates the feed, settles the market and samples the pool for the matcher. A hot key that holds
+    /// only what its fees need and can move nothing else: the feed update and cranks are open to anyone, and the
+    /// matcher's samples take this key as its observer.
+    pub keeper: Keypair,
     /// Mint authority of the collateral mint, to fund the house and the trader.
     pub mint_authority: Keypair,
 }
@@ -112,6 +116,10 @@ impl Ctx {
             collateral: pk(&cfg, "collateralMint")?,
             house: read_keypair(&house)?,
             trader: load_or_new("trader.json")?,
+            keeper: match std::env::var("KEEPER_KEYPAIR") {
+                Ok(path) => read_keypair(&expand(&path))?,
+                Err(_) => load_or_new("keeper.json")?,
+            },
             mint_authority: read_keypair(&minter)?,
         })
     }

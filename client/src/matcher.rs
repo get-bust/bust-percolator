@@ -121,8 +121,8 @@ fn open_context(c: &Ctx, st: &Value, house: &Pubkey, settings_data: &[u8]) -> Re
                 AccountMeta::new_readonly(c.program, false),
                 AccountMeta::new_readonly(feed_address(&market, 0).0, false),
                 AccountMeta::new_readonly(fee_account(c), false),
-                // the keeper samples the pool with the house's key on devnet; on mainnet a key of its own
-                AccountMeta::new_readonly(c.house.pubkey(), false),
+                // the keeper's own key samples the pool
+                AccountMeta::new_readonly(c.keeper.pubkey(), false),
                 AccountMeta::new_readonly(system_program::ID, false),
             ],
         );
@@ -218,7 +218,7 @@ pub fn params(c: &Ctx, oi_cap_bps: u64, max_gap_bps: u64, paid_max_gap_bps: u64,
                     AccountMeta::new(context_of(c, &st, house)?, false),
                     AccountMeta::new_readonly(feed_address(&pk(&st, "market")?, 0).0, false),
                     AccountMeta::new_readonly(fee_account(c), false),
-                    AccountMeta::new_readonly(c.house.pubkey(), false),
+                    AccountMeta::new_readonly(c.keeper.pubkey(), false),
                 ],
             ))
         })
@@ -240,8 +240,7 @@ fn pool_metas(feed: &Feed) -> Vec<AccountMeta> {
     metas
 }
 
-/// The keeper samples the pool into every house portfolio's context, signed by the observer (the house's key on
-/// devnet).
+/// The keeper samples the pool into every house portfolio's context, signed by the observer (the keeper's key).
 pub fn observe_ixs(c: &Ctx, st: &Value) -> Result<Vec<Instruction>> {
     shards(st)?.iter().map(|house| observe_ix(c, st, house)).collect()
 }
