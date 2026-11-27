@@ -361,6 +361,33 @@ transaction than right before `Prepare`. Both count as unpaid and are refused wi
 properly passes, and the four attempts above are still refused. A keeper sample costs 5,642 compute units, sent with
 the feed update.
 
+### More than one house portfolio, and an asset kept current
+
+Finding 13 says trades against one house portfolio go one at a time, so the house was given two more portfolios, each
+with its own matcher context and 1,000 USDC, and an order goes to one at random and to the next if that one has just
+traded. Racing three traders at once against one house portfolio, one order went through and the other two failed as
+stale (`EngineStale`), as expected. Spread over three, they did not all go through, and finding why showed two rules of
+Percolator's that every trade that adds risk depends on:
+
+18. **The asset's accrual must reach the slot of the trade.** Percolator accrues an asset at most
+    `max_accrual_dt_slots` a crank (20 on the devnet market, 64,683 compute units a crank), and refuses a trade that
+    adds risk (`EngineLockActive`) while an asset with open interest is behind the chain's slot. The devnet asset had
+    not been cranked for six days and was 1,313,479 slots behind: every open with open interest locked, which earlier
+    tests had not shown because they opened at zero open interest and closing is never refused. `perc catch-up`
+    brought it back in about 65,700 cranks, and the keeper now cranks with every tick. Too few cranks in a trade leave
+    it behind; one too many, with the price still moving toward a new mark, fails as `EngineNonProgress`, since a
+    crank with no slot left to accrue cannot move it.
+19. **A price move leaves every position stale until its portfolio is cranked.** When the mark moves, Percolator
+    marks every stored position on the asset stale, and refuses any trade that adds risk on the asset until each of
+    those portfolios has been cranked. The keeper now finds the asset's holders on chain (`perc holders`) and cranks
+    them after the price moves; a market with many holders needs that many cranks after every mark.
+
+Both are set by the market's parameters, fixed when it is opened: the price may move `max_price_move_bps_per_slot` a
+slot, at most `max_accrual_dt_slots` slots are accrued a crank, and Percolator holds their product under the
+maintenance margin (10 bps × 20 slots = 2% against 5% here). A wider accrual makes the cranks simple but slows how
+fast the mark can follow, and a trade that adds risk waits while it lags. Whether three orders at once go through on
+three house portfolios has not been shown yet; the parameters are next, measured on a market of their own.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
@@ -370,8 +397,9 @@ the feed update.
   dollars with Pyth, Raydium CPMM and AMM v4 pools read, and a keeper calls it; on mainnet the keeper runs on a host
   of its own, with a second one that anyone can run, since an update is permissionless, and a trader can update in
   its own transaction; an open past the gap limit pays the gap in the same transaction, and the gap is measured
-  against the keeper's samples. Left: more than one house portfolio, so that trades do not wait for each other
-  (finding 13), and the keeper's own key for its samples (the house's key does it on devnet).
+  against the keeper's samples. Left: the market's accrual and price-move parameters (findings 18 and 19), measured
+  on a market of their own, then whether orders on several house portfolios go through at once (finding 13), and the
+  keeper's own key for its samples (the house's key does it on devnet).
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap

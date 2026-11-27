@@ -94,15 +94,25 @@ trader could move there and move back: each of six buckets keeps the highest and
 prices cannot undo. A trader pays the gap with a token transfer to the house's fee account as the instruction right
 before `Prepare`: the matcher then opens as much as the transfer pays for, at the widest gap the house sells.
 
+Every trade advances the house portfolio's position epoch and names it exactly, so orders against one house portfolio
+go one at a time. The house keeps several portfolios, each with its own matcher context; an order goes to one at
+random and to the next if that one has just traded. The open interest cap is read from the market, across all of them.
+
+Percolator accrues an asset at most `max_accrual_dt_slots` slots per crank, and refuses a trade that adds risk while an
+asset with open interest is behind the chain. The keeper therefore cranks with every tick as many times as it takes to
+keep the asset at the chain's slot; `perc catch-up` brings back an asset that was left uncranked.
+
 `matcher/src/layout.rs` reads Percolator's accounts at fixed offsets; its tests hold them to Percolator's types and to
 its own readers on devnet accounts.
 
 ```sh
 cd matcher && cargo test && cargo-build-sbf && cd ..
 client/target/release/perc matcher init 500 0 2000 60   # cap at 5% of the pool, no free gap, gaps up to 20% sold, a 60 s window
-client/target/release/perc feed run 10                  # the keeper: a feed update and a matcher sample every 10 s
+client/target/release/perc matcher shards 2 1000        # two more house portfolios, 1,000 USDC each
+client/target/release/perc feed run 10                  # the keeper: a feed update, cranks and the matcher's samples every 10 s
 client/target/release/perc order 1 200                  # the app's path: the trader alone, paying a gap of at most 200 bps
 client/target/release/perc matcher attack               # simulate the ways around the snapshot and the fee; each is refused
+client/target/release/perc matcher race 3 3             # three traders at once over three house portfolios
 ```
 
 ## Scripts
