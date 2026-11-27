@@ -417,6 +417,23 @@ three retries, every close went through, and the keeper settled each mark in 4.4
 transactions and none failing. A mark every 30 s then costs about 19,000 lamports with this market's handful of
 holders, 0.055 SOL a day, plus a transaction for every eight more holders at each mark that moves the price.
 
+What a market costs to keep tradable, then, grows with its holders and with how often its mark moves. At 6,400
+lamports a transaction (5,000 for the signature, a whole transaction's compute at 1,000 micro-lamports a unit), an
+update, about half an extra accrual and a transaction per eight holders at each mark that moves the price:
+
+| holders | a mark every 30 s | every 60 s | every 120 s |
+|---|---|---|---|
+| 10 | 0.065 SOL a day | 0.032 | 0.016 |
+| 100 | 0.27 | 0.13 | 0.067 |
+| 1,000 | 2.3 | 1.2 | 0.58 |
+
+A holder that trades is refreshed by its own trade, and a holder's crank is also the check that liquidates it, which a
+market needs after every move in any case. The settle takes about 4.4 s, during which an open is refused and retried,
+so a mark every 30 s keeps opens waiting about 15% of the time, every 120 s about 4%; the mark is a 30-minute average,
+which a two-minute cadence follows within two minutes. The keeper signs with a key of its own, holding only its fees:
+the feed update and every crank are open to anyone, and the matcher's samples take that key as their observer. An
+order that meets a settle goes round the house portfolios again after a short pause.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
@@ -427,9 +444,8 @@ holders, 0.055 SOL a day, plus a transaction for every eight more holders at eac
   of its own, with a second one that anyone can run, since an update is permissionless, and a trader can update in
   its own transaction; an open past the gap limit pays the gap in the same transaction, and the gap is measured
   against the keeper's samples. Orders on several house portfolios go through at once (finding 13), and the keeper
-  settles the market after each mark (findings 18 to 22). Left: the cost of settling with many holders (a crank each,
-  eight to a transaction, after every move of the price) against how often the mark moves, and the keeper's own key
-  for its samples (the house's key does it on devnet).
+  settles the market after each mark (findings 18 to 22). Left: each coin's mark cadence, chosen with its holders and the
+  cost table above; a keeper on a host of its own, with its own key funded for its fees.
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap

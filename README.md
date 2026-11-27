@@ -104,7 +104,8 @@ the last price move; a crank that finds nothing to do fails its whole transactio
 portfolios, so it carries no cranks. After each mark the keeper settles the market (`mark::settle`): the update itself
 carries the cranks that move the price to the mark, then the holders the move left stale are cranked, eight to a
 transaction, all at once.
-Between marks nothing moves. `perc catch-up` brings back an asset left far behind.
+Between marks nothing moves. `perc catch-up` brings back an asset left far behind. The keeper signs with a key of its
+own (`KEEPER_KEYPAIR`, default `keys/keeper.json`), which is also the matcher's observer and holds only its fees.
 
 `matcher/src/layout.rs` reads Percolator's accounts at fixed offsets; its tests hold them to Percolator's types and to
 its own readers on devnet accounts.
