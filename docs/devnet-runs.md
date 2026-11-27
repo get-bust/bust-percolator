@@ -361,32 +361,53 @@ transaction than right before `Prepare`. Both count as unpaid and are refused wi
 properly passes, and the four attempts above are still refused. A keeper sample costs 5,642 compute units, sent with
 the feed update.
 
-### More than one house portfolio, and an asset kept current
+### More than one house portfolio, and a market kept tradable
 
 Finding 13 says trades against one house portfolio go one at a time, so the house was given two more portfolios, each
-with its own matcher context and 1,000 USDC, and an order goes to one at random and to the next if that one has just
-traded. Racing three traders at once against one house portfolio, one order went through and the other two failed as
-stale (`EngineStale`), as expected. Spread over three, they did not all go through, and finding why showed two rules of
-Percolator's that every trade that adds risk depends on:
+with its own matcher context and 1,000 USDC, and an order goes to one of them. Racing three traders at once against
+one house portfolio, one order went through and the other two failed as stale (`EngineStale`), as expected. Spread
+over three, they did not all go through, and finding out why took most of a day: every trade that adds risk depends
+on rules of Percolator's that the earlier tests had not met, since they opened at zero open interest and closing is
+seldom refused.
 
-18. **The asset's accrual must reach the slot of the trade.** Percolator accrues an asset at most
-    `max_accrual_dt_slots` a crank (20 on the devnet market, 64,683 compute units a crank), and refuses a trade that
-    adds risk (`EngineLockActive`) while an asset with open interest is behind the chain's slot. The devnet asset had
-    not been cranked for six days and was 1,313,479 slots behind: every open with open interest locked, which earlier
-    tests had not shown because they opened at zero open interest and closing is never refused. `perc catch-up`
-    brought it back in about 65,700 cranks, and the keeper now cranks with every tick. Too few cranks in a trade leave
-    it behind; one too many, with the price still moving toward a new mark, fails as `EngineNonProgress`, since a
-    crank with no slot left to accrue cannot move it.
-19. **A price move leaves every position stale until its portfolio is cranked.** When the mark moves, Percolator
-    marks every stored position on the asset stale, and refuses any trade that adds risk on the asset until each of
-    those portfolios has been cranked. The keeper now finds the asset's holders on chain (`perc holders`) and cranks
-    them after the price moves; a market with many holders needs that many cranks after every mark.
+18. **An accrual cut short locks the asset.** Percolator accrues an asset at most `max_accrual_dt_slots` slots a crank
+    (20 here, 64,683 compute units a crank) and moves the market's slot to the present as it does; while the asset's
+    accrual trails the market's slot, a trade that adds risk fails (`EngineLockActive`). The devnet asset, uncranked
+    for six days, was 1,313,479 slots behind: `perc catch-up` brought it back in about 65,700 cranks. A market nobody
+    touches is not behind: only an accrual moves the market's slot.
+19. **A price move leaves every position stale until its portfolio is cranked.** When an accrual changes the asset's
+    K or F index, Percolator marks every stored position on both sides stale and refuses any trade that adds risk on
+    the asset until each of those portfolios is cranked. A trade refreshes its own two portfolios; everyone else
+    needs a crank after every move of the price.
+20. **A crank with nothing to do fails its whole transaction** (`EngineNonProgress`, Percolator's INV-071), unless it
+    accrued the asset. Cranks in a trade's transaction therefore fail whenever another crank got there first: the
+    trade now carries none.
+21. **A close can be refused too.** Percolator weighs both sides of a trade, so a trader's close that adds to the house
+    portfolio's position counts as adding risk. An order now tries first the house portfolios whose position it
+    reduces.
+22. **A funding bound did not help.** With `max_abs_funding_e9_per_slot` above zero a trade accrues the asset itself,
+    which looked like a way around finding 18. On a second devnet market set up that way, opens went through 50% of
+    the time, then not at all, with positions staying stale through every crank. Percolator's code shows that any
+    accrual at a nonzero funding rate changes F and leaves every position stale again; which accrual did it there was
+    not pinned down. Funding stays at zero.
 
-Both are set by the market's parameters, fixed when it is opened: the price may move `max_price_move_bps_per_slot` a
-slot, at most `max_accrual_dt_slots` slots are accrued a crank, and Percolator holds their product under the
-maintenance margin (10 bps × 20 slots = 2% against 5% here). A wider accrual makes the cranks simple but slows how
-fast the mark can follow, and a trade that adds risk waits while it lags. Whether three orders at once go through on
-three house portfolios has not been shown yet; the parameters are next, measured on a market of their own.
+The keeper now settles the market after each mark (`mark::settle`): it accrues the asset until the price has caught up
+and no accrual is left cut short, then cranks each holder the move left stale, one transaction each, so a holder
+another crank settled first fails alone. Between marks nothing moves and nothing is sent. With a mark every 30 s, a
+standing position held, and an order added to it and taken back off every few seconds for six minutes
+(`perc study`):
+
+| | first try | within 3 retries |
+|---|---|---|
+| 28 opens, adding risk with open interest | 79% | 100% |
+| 28 closes | 100% | 100% |
+
+The market was ready for an open in 96% of the samples; each settle took 5 to 7 s and 2 to 4 crank transactions, none
+of them failed. An open that misses lands inside that settle. Before this, with cranks in each trade, 80% of opens and
+62% of closes went through within three tries.
+
+Racing three traders at once over the three house portfolios, all three opens went through in three races out of
+four; in the fourth all three landed inside a settle. On one house portfolio, one of three goes through.
 
 ## Before mainnet
 
@@ -397,9 +418,10 @@ three house portfolios has not been shown yet; the parameters are next, measured
   dollars with Pyth, Raydium CPMM and AMM v4 pools read, and a keeper calls it; on mainnet the keeper runs on a host
   of its own, with a second one that anyone can run, since an update is permissionless, and a trader can update in
   its own transaction; an open past the gap limit pays the gap in the same transaction, and the gap is measured
-  against the keeper's samples. Left: the market's accrual and price-move parameters (findings 18 and 19), measured
-  on a market of their own, then whether orders on several house portfolios go through at once (finding 13), and the
-  keeper's own key for its samples (the house's key does it on devnet).
+  against the keeper's samples. Orders on several house portfolios go through at once (finding 13), and the keeper
+  settles the market after each mark (findings 18 to 22). Left: a shorter settle (the holders' cranks sent together),
+  the cost of settling with many holders (one crank each after every move of the price), and the keeper's own key for
+  its samples (the house's key does it on devnet).
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap

@@ -98,9 +98,12 @@ Every trade advances the house portfolio's position epoch and names it exactly, 
 go one at a time. The house keeps several portfolios, each with its own matcher context; an order goes to one at
 random and to the next if that one has just traded. The open interest cap is read from the market, across all of them.
 
-Percolator accrues an asset at most `max_accrual_dt_slots` slots per crank, and refuses a trade that adds risk while an
-asset with open interest is behind the chain. The keeper therefore cranks with every tick as many times as it takes to
-keep the asset at the chain's slot; `perc catch-up` brings back an asset that was left uncranked.
+Percolator refuses a trade that adds risk while the asset's price is still moving toward a new mark, while an accrual
+was cut short (a crank accrues at most `max_accrual_dt_slots`), or while any position on the asset was left stale by
+the last price move; a crank that finds nothing to do fails its whole transaction. A trade refreshes its own two
+portfolios, so it carries no cranks. After each mark the keeper settles the market (`mark::settle`): it accrues the
+asset until the price has caught up, then cranks each holder the move left stale, each in a transaction of its own.
+Between marks nothing moves. `perc catch-up` brings back an asset left far behind.
 
 `matcher/src/layout.rs` reads Percolator's accounts at fixed offsets; its tests hold them to Percolator's types and to
 its own readers on devnet accounts.
@@ -109,10 +112,11 @@ its own readers on devnet accounts.
 cd matcher && cargo test && cargo-build-sbf && cd ..
 client/target/release/perc matcher init 500 0 2000 60   # cap at 5% of the pool, no free gap, gaps up to 20% sold, a 60 s window
 client/target/release/perc matcher shards 2 1000        # two more house portfolios, 1,000 USDC each
-client/target/release/perc feed run 10                  # the keeper: a feed update, cranks and the matcher's samples every 10 s
+client/target/release/perc feed run 30                  # the keeper: a mark and the matcher's samples every 30 s, then settles
 client/target/release/perc order 1 200                  # the app's path: the trader alone, paying a gap of at most 200 bps
 client/target/release/perc matcher attack               # simulate the ways around the snapshot and the fee; each is refused
 client/target/release/perc matcher race 3 3             # three traders at once over three house portfolios
+client/target/release/perc study a 6 3                  # beside the keeper: how often an open goes through
 ```
 
 ## Scripts
