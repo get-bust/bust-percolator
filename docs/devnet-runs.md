@@ -409,6 +409,14 @@ of them failed. An open that misses lands inside that settle. Before this, with 
 Racing three traders at once over the three house portfolios, all three opens went through in three races out of
 four; in the fourth all three landed inside a settle. On one house portfolio, one of three goes through.
 
+The settle was then shortened: the update carries the cranks that move the price to the new mark (nothing accrues
+between marks, so each has slots to accrue), and the stale holders are cranked eight to a transaction (about 129,000
+compute units each after a move), all at once; a batch refused because one of its holders was settled first is resent
+one by one. Over four more six-minute runs, 62% to 79% of opens went through at the first try and 96% to 100% within
+three retries, every close went through, and the keeper settled each mark in 4.4 s on average with two crank
+transactions and none failing. A mark every 30 s then costs about 19,000 lamports with this market's handful of
+holders, 0.055 SOL a day, plus a transaction for every eight more holders at each mark that moves the price.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
@@ -419,9 +427,9 @@ four; in the fourth all three landed inside a settle. On one house portfolio, on
   of its own, with a second one that anyone can run, since an update is permissionless, and a trader can update in
   its own transaction; an open past the gap limit pays the gap in the same transaction, and the gap is measured
   against the keeper's samples. Orders on several house portfolios go through at once (finding 13), and the keeper
-  settles the market after each mark (findings 18 to 22). Left: a shorter settle (the holders' cranks sent together),
-  the cost of settling with many holders (one crank each after every move of the price), and the keeper's own key for
-  its samples (the house's key does it on devnet).
+  settles the market after each mark (findings 18 to 22). Left: the cost of settling with many holders (a crank each,
+  eight to a transaction, after every move of the price) against how often the mark moves, and the keeper's own key
+  for its samples (the house's key does it on devnet).
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap

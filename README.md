@@ -101,8 +101,9 @@ random and to the next if that one has just traded. The open interest cap is rea
 Percolator refuses a trade that adds risk while the asset's price is still moving toward a new mark, while an accrual
 was cut short (a crank accrues at most `max_accrual_dt_slots`), or while any position on the asset was left stale by
 the last price move; a crank that finds nothing to do fails its whole transaction. A trade refreshes its own two
-portfolios, so it carries no cranks. After each mark the keeper settles the market (`mark::settle`): it accrues the
-asset until the price has caught up, then cranks each holder the move left stale, each in a transaction of its own.
+portfolios, so it carries no cranks. After each mark the keeper settles the market (`mark::settle`): the update itself
+carries the cranks that move the price to the mark, then the holders the move left stale are cranked, eight to a
+transaction, all at once.
 Between marks nothing moves. `perc catch-up` brings back an asset left far behind.
 
 `matcher/src/layout.rs` reads Percolator's accounts at fixed offsets; its tests hold them to Percolator's types and to
