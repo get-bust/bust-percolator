@@ -32,6 +32,8 @@ const OI_LONG: usize = 289;
 const OI_SHORT: usize = 305;
 const EPOCH_LONG: usize = 529;
 const EPOCH_SHORT: usize = 537;
+const KF_EPOCH_LONG: usize = 145;
+const KF_EPOCH_SHORT: usize = 153;
 
 const PORTFOLIO_LEN: usize = 9435;
 /// Where a portfolio names its market: the first field of its provenance header.
@@ -47,6 +49,7 @@ const LEG_MARKET_ID: usize = 5;
 const LEG_SIDE: usize = 13;
 const LEG_BASIS: usize = 14;
 const LEG_A_BASIS: usize = 30;
+const LEG_KF_EPOCH: usize = 78;
 const LEG_EPOCH: usize = 86;
 
 pub const ADL_ONE: u128 = 1_000_000_000_000_000;
@@ -83,6 +86,9 @@ pub struct Asset {
     pub oi_short_q: u128,
     pub epoch_long: u64,
     pub epoch_short: u64,
+    /// The slot of each side's last K/F change: a leg settled before it is stale.
+    pub kf_epoch_long: u64,
+    pub kf_epoch_short: u64,
 }
 
 /// The asset at `asset_index` of a market account, or None for an account that is not a market or has no such slot.
@@ -107,6 +113,8 @@ pub fn asset(market: &[u8], asset_index: u16) -> Option<Asset> {
         oi_short_q: u128_at(market, o + OI_SHORT),
         epoch_long: u64_at(market, o + EPOCH_LONG),
         epoch_short: u64_at(market, o + EPOCH_SHORT),
+        kf_epoch_long: u64_at(market, o + KF_EPOCH_LONG),
+        kf_epoch_short: u64_at(market, o + KF_EPOCH_SHORT),
     })
 }
 
@@ -125,6 +133,20 @@ pub fn holds_leg(portfolio: &[u8], asset_index: u16, market_id: u64) -> bool {
         && (0..LEGS).any(|k| {
             let o = LEGS_OFF + k * LEG_LEN;
             portfolio[o + LEG_ACTIVE] == 1 && u32_at(portfolio, o + LEG_ASSET) == asset_index as u32 && u64_at(portfolio, o + LEG_MARKET_ID) == market_id
+        })
+}
+
+/// Whether the portfolio holds a leg of the asset settled before its side's last K/F change: Percolator counts such a
+/// leg stale and refuses any trade that adds risk on the asset until a crank of the portfolio settles it.
+pub fn leg_stale(portfolio: &[u8], asset_index: u16, asset: &Asset) -> bool {
+    portfolio_owner(portfolio).is_some()
+        && (0..LEGS).any(|k| {
+            let o = LEGS_OFF + k * LEG_LEN;
+            if portfolio[o + LEG_ACTIVE] != 1 || u32_at(portfolio, o + LEG_ASSET) != asset_index as u32 || u64_at(portfolio, o + LEG_MARKET_ID) != asset.market_id {
+                return false;
+            }
+            let side_epoch = if portfolio[o + LEG_SIDE] == 0 { asset.kf_epoch_long } else { asset.kf_epoch_short };
+            u64_at(portfolio, o + LEG_KF_EPOCH) < side_epoch
         })
 }
 
@@ -193,6 +215,8 @@ mod tests {
             (OI_SHORT, offset_of!(AssetStateV16Account, oi_eff_short_q)),
             (EPOCH_LONG, offset_of!(AssetStateV16Account, epoch_long)),
             (EPOCH_SHORT, offset_of!(AssetStateV16Account, epoch_short)),
+            (KF_EPOCH_LONG, offset_of!(AssetStateV16Account, kf_epoch_long)),
+            (KF_EPOCH_SHORT, offset_of!(AssetStateV16Account, kf_epoch_short)),
             (OWNER_OFF, HEADER_LEN + offset_of!(PortfolioAccountV16Account, owner)),
             (LEGS_OFF, HEADER_LEN + offset_of!(PortfolioAccountV16Account, legs)),
             (LEG_LEN, size_of::<PortfolioLegV16Account>()),
@@ -203,6 +227,7 @@ mod tests {
             (LEG_BASIS, offset_of!(PortfolioLegV16Account, basis_pos_q)),
             (LEG_A_BASIS, offset_of!(PortfolioLegV16Account, a_basis)),
             (LEG_EPOCH, offset_of!(PortfolioLegV16Account, epoch_snap)),
+            (LEG_KF_EPOCH, offset_of!(PortfolioLegV16Account, kf_epoch_snap)),
             (PORTFOLIO_LEN, constants::PORTFOLIO_ENGINE_ACCOUNT_LEN),
             (
                 PORTFOLIO_MARKET_OFF,
@@ -225,6 +250,7 @@ mod tests {
         assert_eq!((ours.a_long, ours.a_short), (theirs.a_long, theirs.a_short));
         assert_eq!((ours.oi_long_q, ours.oi_short_q), (theirs.oi_eff_long_q, theirs.oi_eff_short_q));
         assert_eq!((ours.epoch_long, ours.epoch_short), (theirs.epoch_long, theirs.epoch_short));
+        assert_eq!((ours.kf_epoch_long, ours.kf_epoch_short), (theirs.kf_epoch_long, theirs.kf_epoch_short));
         assert!(asset(MARKET, 1).is_none(), "one slot");
         assert!(asset(TRADER, 0).is_none(), "a portfolio is not a market");
     }
@@ -276,6 +302,21 @@ mod tests {
         assert!(holds_leg(&d, 0, a.market_id));
         assert!(!holds_leg(&d, 0, a.market_id + 1));
         assert!(!holds_leg(MARKET, 0, a.market_id));
+    }
+
+    #[test]
+    fn a_leg_settled_before_its_sides_last_kf_change_is_stale() {
+        let mut a = asset(MARKET, 0).unwrap();
+        a.kf_epoch_long = 1_000;
+        let mut d = with_leg(&a, true, 5_000_000, ADL_ONE, a.epoch_long);
+        let o = LEGS_OFF;
+        d[o + LEG_KF_EPOCH..o + LEG_KF_EPOCH + 8].copy_from_slice(&999u64.to_le_bytes());
+        assert!(leg_stale(&d, 0, &a));
+        d[o + LEG_KF_EPOCH..o + LEG_KF_EPOCH + 8].copy_from_slice(&1_000u64.to_le_bytes());
+        assert!(!leg_stale(&d, 0, &a));
+        // the short side's epoch does not bear on a long leg
+        a.kf_epoch_short = 5_000;
+        assert!(!leg_stale(&d, 0, &a));
     }
 
     #[test]
