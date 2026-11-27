@@ -283,8 +283,9 @@ fn quote_price(feed: &Feed, ai: &AccountInfo, now: i64) -> Result<(u64, i32), Pr
     Ok((price, expo))
 }
 
-/// The pool's price in collateral atoms per contract; `price_ai` is the quote price account when the feed has one.
-fn pool_spot(feed: &Feed, pool_ai: &AccountInfo, base_ai: &AccountInfo, quote_ai: &AccountInfo, price_ai: Option<&AccountInfo>, now: i64) -> Result<u64, ProgramError> {
+/// The pool's base reserve in base atoms and its price in collateral atoms per contract; `price_ai` is the quote
+/// price account when the feed has one. The matcher reads the pool through this too, so both see the same price.
+pub fn pool_reading(feed: &Feed, pool_ai: &AccountInfo, base_ai: &AccountInfo, quote_ai: &AccountInfo, price_ai: Option<&AccountInfo>, now: i64) -> Result<(u64, u64), ProgramError> {
     if *pool_ai.key != feed.pool || *base_ai.key != feed.base_vault || *quote_ai.key != feed.quote_vault {
         return Err(MarkError::WrongAccount.into());
     }
@@ -296,7 +297,12 @@ fn pool_spot(feed: &Feed, pool_ai: &AccountInfo, base_ai: &AccountInfo, quote_ai
         let (price, expo) = quote_price(feed, price_ai.ok_or(MarkError::QuotePrice)?, now)?;
         twap::spot_in_collateral(base, quote, feed.contract_base_atoms, price, expo, feed.quote_decimals)
     };
-    spot.ok_or_else(|| MarkError::EmptyPool.into())
+    Ok((base, spot.ok_or(MarkError::EmptyPool)?))
+}
+
+/// The pool's price in collateral atoms per contract.
+fn pool_spot(feed: &Feed, pool_ai: &AccountInfo, base_ai: &AccountInfo, quote_ai: &AccountInfo, price_ai: Option<&AccountInfo>, now: i64) -> Result<u64, ProgramError> {
+    pool_reading(feed, pool_ai, base_ai, quote_ai, price_ai, now).map(|(_, spot)| spot)
 }
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
