@@ -264,13 +264,17 @@ fn quote_price(feed: &Feed, ai: &AccountInfo, now: i64) -> Result<(u64, i32), Pr
     if *ai.key != feed.quote_feed || *ai.owner != PYTH_RECEIVER {
         return Err(MarkError::WrongAccount.into());
     }
-    let d = ai.try_borrow_data()?;
+    read_quote_price(feed, &ai.try_borrow_data()?, now)
+}
+
+/// `quote_price` on the account's data, for readers off chain.
+pub fn read_quote_price(feed: &Feed, d: &[u8], now: i64) -> Result<(u64, i32), ProgramError> {
     // discriminator, write authority, verification level (1: full), then the price feed message
     if d.len() < 134 || d[..8] != PYTH_PRICE_UPDATE_V2 || d[40] != 1 || d[41..73] != feed.quote_feed_id {
         return Err(MarkError::QuotePrice.into());
     }
     let price = i64::from_le_bytes(d[73..81].try_into().unwrap());
-    let conf = u64_at(&d, 81);
+    let conf = u64_at(d, 81);
     let expo = i32::from_le_bytes(d[89..93].try_into().unwrap());
     let publish_time = i64::from_le_bytes(d[93..101].try_into().unwrap());
     let price = u64::try_from(price).ok().filter(|&p| p > 0).ok_or(MarkError::QuotePrice)?;
@@ -289,13 +293,21 @@ pub fn pool_reading(feed: &Feed, pool_ai: &AccountInfo, base_ai: &AccountInfo, q
     if *pool_ai.key != feed.pool || *base_ai.key != feed.base_vault || *quote_ai.key != feed.quote_vault {
         return Err(MarkError::WrongAccount.into());
     }
-    let (base, quote) = pools::reserves(feed.pool_kind, &pool_ai.try_borrow_data()?, feed.base_side, token_amount(base_ai)?, token_amount(quote_ai)?, now)
-        .ok_or(MarkError::EmptyPool)?;
-    let spot = if feed.quote_feed == Pubkey::default() {
-        twap::spot(base, quote, feed.contract_base_atoms)
-    } else {
-        let (price, expo) = quote_price(feed, price_ai.ok_or(MarkError::QuotePrice)?, now)?;
-        twap::spot_in_collateral(base, quote, feed.contract_base_atoms, price, expo, feed.quote_decimals)
+    let price = match (feed.quote_feed == Pubkey::default(), price_ai) {
+        (true, _) => None,
+        (false, Some(ai)) => Some(quote_price(feed, ai, now)?),
+        (false, None) => return Err(MarkError::QuotePrice.into()),
+    };
+    read_pool(feed, &pool_ai.try_borrow_data()?, token_amount(base_ai)?, token_amount(quote_ai)?, price, now)
+}
+
+/// `pool_reading` on the pool's data, its two vault amounts and the quote price, for readers off chain.
+pub fn read_pool(feed: &Feed, pool: &[u8], base_vault: u64, quote_vault: u64, quote_price: Option<(u64, i32)>, now: i64) -> Result<(u64, u64), ProgramError> {
+    let (base, quote) = pools::reserves(feed.pool_kind, pool, feed.base_side, base_vault, quote_vault, now).ok_or(MarkError::EmptyPool)?;
+    let spot = match (feed.quote_feed == Pubkey::default(), quote_price) {
+        (true, _) => twap::spot(base, quote, feed.contract_base_atoms),
+        (false, Some((price, expo))) => twap::spot_in_collateral(base, quote, feed.contract_base_atoms, price, expo, feed.quote_decimals),
+        (false, None) => return Err(MarkError::QuotePrice.into()),
     };
     Ok((base, spot.ok_or(MarkError::EmptyPool)?))
 }
