@@ -1,0 +1,26 @@
+[package]
+name = "bust-matcher"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The house's quoting rules for Percolator's TradeCpi, checked on chain against a snapshot taken in the same transaction"
+license-file = "../LICENSE"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "bust_matcher"
+
+[features]
+no-entrypoint = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+solana-program = "1.18"
+bust-mark = { path = "../mark", features = ["no-entrypoint"] }
+
+[dev-dependencies]
+percolator-prog = { path = "../percolator-prog", features = ["no-entrypoint"] }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "710761371c75b85bfe8209986fc16a87d68fdbd0" }
+
+[workspace]
