@@ -173,10 +173,10 @@ fn read_pool_file(name: &str) -> Result<Value> {
     Ok(serde_json::from_str(&std::fs::read_to_string(crate::ctx::root().join("state").join(name))?)?)
 }
 
-/// An update uses about 16,100 compute units, Percolator's PushAuthMark included.
-const UPDATE_UNITS: u32 = 25_000;
-/// A matcher sample with it, one per house portfolio: 5,642 units on devnet.
-const OBSERVE_UNITS: u32 = 8_000;
+
+/// Cranks an update carries at most to move the price to the new mark; settling sends the rest.
+const MAX_UPDATE_CRANKS: usize = 8;
+
 
 /// One update: the feed reads the pool, adds an observation and pushes the average.
 pub fn update(c: &Ctx) -> Result<String> {
@@ -196,13 +196,17 @@ pub fn run(c: &Ctx, secs: u64, micro_lamports: u64, check_secs: u64) -> Result<(
     loop {
         if std::time::Instant::now() >= next_update {
             next_update = std::time::Instant::now() + Duration::from_secs(secs);
+            // the new mark, then cranks that accrue the asset since its last accrual and so move the price to the
+            // mark in the same transaction, then the matcher's samples
             let sent = read_state().and_then(|st| {
                 let mut ixs = vec![update_ix(c, &st)?];
+                ixs.extend(crate::mark::accrual_ixs(c, &st, MAX_UPDATE_CRANKS)?);
                 if st.get("matcherCtx").is_some() {
                     ixs.extend(crate::matcher::observe_ixs(c, &st)?);
                 }
-                let units = UPDATE_UNITS + OBSERVE_UNITS * (ixs.len() as u32 - 1);
-                c.send_with_budget(ixs, &[&c.house], units, micro_lamports)
+                // the crank that moves the price costs more than the rest, by how much is not known beforehand: the
+                // update takes a transaction's whole budget
+                c.send_with_budget(ixs, &[&c.house], 1_400_000, micro_lamports)
             });
             match sent {
                 Ok(sig) => {
@@ -223,13 +227,10 @@ pub fn run(c: &Ctx, secs: u64, micro_lamports: u64, check_secs: u64) -> Result<(
                                 s.failed
                             );
                         }
-                        Err(e) => println!("settle: {e}"),
+                        Err(e) => println!("settle: {}", crate::ctx::brief(&e)),
                     }
                 }
-                Err(e) => {
-                    let flat = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
-                    println!("update failed: {}", flat.find("InstructionError").map_or(flat.as_str(), |i| &flat[i..]).chars().take(90).collect::<String>());
-                }
+                Err(e) => println!("update failed: {}", crate::ctx::brief(&e)),
             }
             if last_ok.elapsed() > Duration::from_secs(60) {
                 println!("no update for {} s", last_ok.elapsed().as_secs());

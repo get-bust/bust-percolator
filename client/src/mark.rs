@@ -194,34 +194,93 @@ fn settle_send(c: &Ctx, ixs: Vec<Instruction>, units: u32, micro_lamports: u64, 
         Err(e) if e.to_string().split_whitespace().collect::<String>().contains("Custom(22)") => out.idle += 1,
         Err(e) => {
             out.failed += 1;
-            let flat = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
-            println!("settle: {}", flat.find("InstructionError").map_or(flat.as_str(), |i| &flat[i..]).chars().take(90).collect::<String>());
+            println!("settle: {}", crate::ctx::brief(&e));
         }
+    }
+}
+
+/// Cranks that accrue the asset to the chain's slot, which moves its price toward the mark: as many as the gap since
+/// its last accrual needs at `max_accrual_dt_slots` a crank, at most `cap`. None when nothing is left to accrue: such a
+/// crank would fail. Each has slots to accrue when it lands, since the gap only grows until it does.
+pub fn accrual_ixs(c: &Ctx, st: &Value, cap: usize) -> Result<Vec<Instruction>> {
+    let market = pk(st, "market")?;
+    let house = pk(st, "housePortfolio")?;
+    let (behind, dt) = accrual_lag(c, &market)?;
+    let n = (behind.div_ceil(dt) as usize).min(cap);
+    let slot = c.rpc.get_slot()?;
+    // the slot field is not read on chain; varying it keeps identical cranks in one transaction apart
+    Ok((0..n as u64).map(|k| crank_ix(c, &c.house.pubkey(), market, house, slot + k)).collect())
+}
+
+/// Holders cranked in one transaction, at about 129,000 compute units each after a price move (measured on devnet).
+/// After a move every holder has work, so a batch rarely meets a crank with nothing to do; when it does (a holder whose
+/// own trade refreshed it first), only that batch is resent one by one.
+const HOLDERS_PER_TX: usize = 8;
+
+/// Sends each instruction list as a transaction of its own, all at once, and waits for them together; returns the
+/// lists refused for a crank with nothing to do.
+fn send_together(c: &Ctx, txs: Vec<Vec<Instruction>>, units: u32, micro_lamports: u64, out: &mut Settled) -> Result<Vec<Vec<Instruction>>> {
+    use solana_client::rpc_config::RpcSendTransactionConfig;
+    use solana_sdk::{compute_budget::ComputeBudgetInstruction, transaction::Transaction};
+    if txs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let blockhash = c.rpc.get_latest_blockhash()?;
+    let config = RpcSendTransactionConfig { skip_preflight: true, ..Default::default() };
+    let mut sigs = Vec::new();
+    for ixs in &txs {
+        let mut all = vec![ComputeBudgetInstruction::set_compute_unit_limit(units), ComputeBudgetInstruction::set_compute_unit_price(micro_lamports)];
+        all.extend(ixs.iter().cloned());
+        let tx = Transaction::new_signed_with_payer(&all, Some(&c.house.pubkey()), &[&c.house], blockhash);
+        sigs.push(c.rpc.send_transaction_with_config(&tx, config)?);
+    }
+    let started = std::time::Instant::now();
+    loop {
+        let statuses = c.rpc.get_signature_statuses(&sigs)?.value;
+        if statuses.iter().all(|s| s.as_ref().is_some_and(|s| s.satisfies_commitment(c.rpc.commitment()))) || started.elapsed().as_secs() > 30 {
+            let mut idle = Vec::new();
+            for (s, ixs) in statuses.into_iter().zip(txs) {
+                match s.and_then(|s| s.err) {
+                    None => out.ok += 1,
+                    Some(e) if format!("{e:?}").contains("Custom(22)") => {
+                        out.idle += 1;
+                        idle.push(ixs);
+                    }
+                    Some(e) => {
+                        out.failed += 1;
+                        println!("settle: {e:?}");
+                    }
+                }
+            }
+            return Ok(idle);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
 
 /// Brings the market back to where a trade that adds risk goes through, after a mark: accrues the asset to the
 /// market's slot, which moves its price toward the mark (a crank accrues at most `max_accrual_dt_slots`, so it sends
 /// as many as the gap needs and checks), until the price has caught up and no accrual is left half done; then cranks
-/// every holder the move left stale, each in a transaction of its own, so one that another crank settled first
-/// (`EngineNonProgress`) does not take the others down with it. Between marks nothing moves, and nothing needs it.
+/// every holder the move left stale, each in a transaction of its own and all at once, so one that another crank
+/// settled first (`EngineNonProgress`) does not take the others down with it. Between marks nothing moves, and nothing
+/// needs it.
 pub fn settle(c: &Ctx, st: &Value, micro_lamports: u64) -> Result<Settled> {
     let market = pk(st, "market")?;
-    let house = pk(st, "housePortfolio")?;
     let mut out = Settled::default();
     for _ in 0..6 {
         let (_, group) = eng(state::read_market(&c.data(&market)?))?;
         let a = &group.assets[0];
-        let behind_market = group.current_slot.saturating_sub(a.slot_last);
-        if a.raw_oracle_target_price == a.effective_price && behind_market == 0 {
+        if a.raw_oracle_target_price == a.effective_price && group.current_slot == a.slot_last {
             break;
         }
-        let slot = c.rpc.get_slot()?;
-        let gap = slot.saturating_sub(a.slot_last).max(1);
-        let n = (gap.div_ceil(group.config.max_accrual_dt_slots.max(1)) as usize).clamp(1, 12);
-        let ixs = (0..n as u64).map(|k| crank_ix(c, &c.house.pubkey(), market, house, slot + k)).collect();
-        settle_send(c, ixs, (CRANK_UNITS * 2 * n as u32).min(1_400_000), micro_lamports, &mut out);
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        let ixs = accrual_ixs(c, st, 12)?;
+        if ixs.is_empty() {
+            // the price moves only with slots to accrue: wait for one
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            continue;
+        }
+        // the crank that moves the price costs more than the rest, by how much is not known beforehand
+        settle_send(c, ixs, 1_400_000, micro_lamports, &mut out);
     }
     // the asset's own counts say whether anyone is stale; a leg's epoch alone over-counts (it can trail its side's
     // epoch without being counted)
@@ -230,13 +289,17 @@ pub fn settle(c: &Ctx, st: &Value, micro_lamports: u64) -> Result<Settled> {
         return Ok(out);
     }
     let slot = c.rpc.get_slot()?;
-    for h in stale_holders(c, st)? {
-        // a holder's crank after a price move settles its profit and loss: more than a plain crank
-        settle_send(c, vec![crank_ix(c, &c.house.pubkey(), market, h, slot)], 400_000, micro_lamports, &mut out);
+    // a holder's crank after a price move settles its profit and loss: more than a plain crank, so the whole budget
+    let cranks: Vec<Instruction> = stale_holders(c, st)?.into_iter().map(|h| crank_ix(c, &c.house.pubkey(), market, h, slot)).collect();
+    let batches = cranks.chunks(HOLDERS_PER_TX).map(|b| b.to_vec()).collect();
+    let refused = send_together(c, batches, 1_400_000, micro_lamports, &mut out)?;
+    // a batch with one holder already settled is refused whole: those holders one by one
+    let singles = refused.into_iter().flatten().map(|ix| vec![ix]).collect::<Vec<_>>();
+    if !singles.is_empty() {
+        send_together(c, singles, 1_000_000, micro_lamports, &mut out)?;
     }
     Ok(out)
 }
-
 
 /// Brings an asset that was left uncranked back to the chain's slot. Percolator accrues an asset at most
 /// `max_accrual_dt_slots` slots a crank; once the asset has open interest, a trade that adds risk is refused while it

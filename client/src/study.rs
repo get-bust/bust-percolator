@@ -103,45 +103,55 @@ pub fn study(c: &Ctx, tag: &str, minutes: u64, every: u64, retries: u32) -> Resu
     let mut reasons: std::collections::BTreeMap<String, u32> = Default::default();
     let mut firsts: std::collections::BTreeMap<String, u32> = Default::default();
     let mut side = 1i128;
+    let mut skipped = 0u32;
     while started.elapsed() < Duration::from_secs(minutes * 60) {
-        let r = readiness(c, &market)?;
-        samples += 1;
-        if r.lag_atoms == 0 && r.stale == 0 && r.behind == 0 {
-            ready += 1;
-        }
-        // with a standing position, every order adds to it (an open with open interest, the case Percolator guards);
-        // without one, the sides alternate
-        let market_data = c.data(&market)?;
-        let asset = bust_matcher::layout::asset(&market_data, 0).ok_or_else(|| anyhow::anyhow!("not a market"))?;
-        let held = bust_matcher::layout::position(&c.data(&pk(&st, "traderPortfolio")?)?, 0, &asset).unwrap_or(0);
-        side = if held != 0 { held.signum() } else { -side };
-        let (attempts, outcome, first) = place(c, &st, side * SIZE_Q, retries)?;
-        opens += 1;
-        if !first.is_empty() {
-            *firsts.entry(first.clone()).or_default() += 1;
-        }
-        if outcome == "ok" {
-            within += 1;
-            if attempts == 1 {
-                first_try += 1;
+        // a round that meets an RPC error is skipped, not the study; the error is not printed, since it can carry
+        // the RPC's address and key
+        let round = (|| -> Result<()> {
+            let r = readiness(c, &market)?;
+            samples += 1;
+            if r.lag_atoms == 0 && r.stale == 0 && r.behind == 0 {
+                ready += 1;
             }
-        }
-        if attempts > 1 || outcome != "ok" {
-            *reasons.entry(outcome.clone()).or_default() += 1;
-        }
-        writeln!(log, "{}", json!({ "t": started.elapsed().as_secs(), "kind": "open", "attempts": attempts, "outcome": outcome, "first": first, "lag": r.lag_atoms, "stale": r.stale, "behind": r.behind }))?;
-        if outcome == "ok" {
-            let (attempts, outcome, first) = place(c, &st, -side * SIZE_Q, retries)?;
+            // with a standing position, every order adds to it (an open with open interest, the case Percolator guards);
+            // without one, the sides alternate
+            let market_data = c.data(&market)?;
+            let asset = bust_matcher::layout::asset(&market_data, 0).ok_or_else(|| anyhow::anyhow!("not a market"))?;
+            let held = bust_matcher::layout::position(&c.data(&pk(&st, "traderPortfolio")?)?, 0, &asset).unwrap_or(0);
+            side = if held != 0 { held.signum() } else { -side };
+            let (attempts, outcome, first) = place(c, &st, side * SIZE_Q, retries)?;
+            opens += 1;
             if !first.is_empty() {
-                *firsts.entry(format!("close: {first}")).or_default() += 1;
+                *firsts.entry(first.clone()).or_default() += 1;
             }
-            closes += 1;
             if outcome == "ok" {
-                closed += 1;
+                within += 1;
+                if attempts == 1 {
+                    first_try += 1;
+                }
             }
-            writeln!(log, "{}", json!({ "t": started.elapsed().as_secs(), "kind": "close", "attempts": attempts, "outcome": outcome }))?;
+            if attempts > 1 || outcome != "ok" {
+                *reasons.entry(outcome.clone()).or_default() += 1;
+            }
+            writeln!(log, "{}", json!({ "t": started.elapsed().as_secs(), "kind": "open", "attempts": attempts, "outcome": outcome, "first": first, "lag": r.lag_atoms, "stale": r.stale, "behind": r.behind }))?;
+            if outcome == "ok" {
+                let (attempts, outcome, first) = place(c, &st, -side * SIZE_Q, retries)?;
+                if !first.is_empty() {
+                    *firsts.entry(format!("close: {first}")).or_default() += 1;
+                }
+                closes += 1;
+                if outcome == "ok" {
+                    closed += 1;
+                }
+                writeln!(log, "{}", json!({ "t": started.elapsed().as_secs(), "kind": "close", "attempts": attempts, "outcome": outcome }))?;
+            }
+            std::thread::sleep(Duration::from_secs(every));
+            Ok(())
+        })();
+        if round.is_err() {
+            skipped += 1;
+            std::thread::sleep(Duration::from_secs(every));
         }
-        std::thread::sleep(Duration::from_secs(every));
     }
     let pct = |a: u32, b: u32| if b == 0 { 0.0 } else { a as f64 * 100.0 / b as f64 };
     println!(
@@ -151,6 +161,9 @@ pub fn study(c: &Ctx, tag: &str, minutes: u64, every: u64, retries: u32) -> Resu
         pct(closed, closes),
         pct(ready, samples)
     );
+    if skipped > 0 {
+        println!("  {skipped} round(s) skipped on an RPC error");
+    }
     for (why, n) in reasons {
         println!("  {n} x ended {why}");
     }

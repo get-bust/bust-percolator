@@ -149,3 +149,13 @@ impl Ctx {
         Ok(self.rpc.get_account_data(key)?)
     }
 }
+
+/// An error in one line, from where Percolator or a program names the failing instruction, or "an RPC error" when it
+/// names none: a connection error carries the RPC's address, key included, and must not be printed.
+pub fn brief(e: &anyhow::Error) -> String {
+    let flat = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.find("InstructionError") {
+        Some(i) => flat[i..].chars().take(90).collect(),
+        None => "an RPC error".into(),
+    }
+}
