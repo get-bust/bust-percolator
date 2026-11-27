@@ -83,26 +83,27 @@ house portfolio, and leaves what it read in the matcher's context. When Percolat
 the running instruction is that `TradeCpi`, at the top level, right after its `Prepare`, and fills by the rules:
 
 - the part of a request that closes the trader's position is always filled;
-- the part that opens is filled only while the pool can be read, while the pool and the mark agree within the gap
-  limit on the side that would gain as the mark catches up, and up to the open interest cap (a share of the pool's
-  coin reserve, valued at the lower of the mark and the pool price). What fits under the cap is a partial fill.
+- the part that opens is filled only while the pool can be read and the keeper has sampled it within the window, up to
+  the open interest cap (a share of the pool's coin reserve, valued at the lower of the mark and the pool price), and,
+  on the side that would gain as the mark catches up to the pool, only as far as the gap is paid. What fits is a
+  partial fill.
+
+The gap is measured against the pool prices the keeper sampled over the last minute (`Observe`, signed by the
+context's observer key, sent with every feed update) as well as the price in the trade's own transaction, which the
+trader could move there and move back: each of six buckets keeps the highest and lowest price it saw, which later
+prices cannot undo. A trader pays the gap with a token transfer to the house's fee account as the instruction right
+before `Prepare`: the matcher then opens as much as the transfer pays for, at the widest gap the house sells.
 
 `matcher/src/layout.rs` reads Percolator's accounts at fixed offsets; its tests hold them to Percolator's types and to
 its own readers on devnet accounts.
 
 ```sh
 cd matcher && cargo test && cargo-build-sbf && cd ..
-client/target/release/perc matcher init 500 100     # the house: open interest up to 5% of the pool, a 1% gap limit
-client/target/release/perc matcher trade -2         # the trader alone; add `update` for a feed update in the same transaction
-client/target/release/perc matcher attack           # simulate the ways around the snapshot; each is refused
-client/target/release/perc order 1 100              # the app's path: the matcher, then a paid entry of at most 100 bps
+client/target/release/perc matcher init 500 0 2000 60   # cap at 5% of the pool, no free gap, gaps up to 20% sold, a 60 s window
+client/target/release/perc feed run 10                  # the keeper: a feed update and a matcher sample every 10 s
+client/target/release/perc order 1 200                  # the app's path: the trader alone, paying a gap of at most 200 bps
+client/target/release/perc matcher attack               # simulate the ways around the snapshot and the fee; each is refused
 ```
-
-`perc order` places an order the way the app does. If the matcher refuses an open because the pool has run past the
-mark, the house quotes a paid entry (`rules::paid_entry`): it co-signs a `TradeNoCpi` that carries the gap as its fee,
-so the trader enters as if at the pool's price, and the trader caps the fee it accepts. Percolator revokes the
-matcher on a house portfolio whenever that portfolio trades outside it, so a trade the house signs enables the matcher
-again in the same transaction.
 
 ## Scripts
 
