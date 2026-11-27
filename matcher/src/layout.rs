@@ -34,6 +34,8 @@ const EPOCH_LONG: usize = 529;
 const EPOCH_SHORT: usize = 537;
 
 const PORTFOLIO_LEN: usize = 9435;
+/// Where a portfolio names its market: the first field of its provenance header.
+pub const PORTFOLIO_MARKET_OFF: usize = HEADER_LEN;
 const OWNER_OFF: usize = HEADER_LEN + 100;
 const LEGS_OFF: usize = HEADER_LEN + 340;
 const LEG_LEN: usize = 152;
@@ -116,6 +118,16 @@ pub fn portfolio_owner(portfolio: &[u8]) -> Option<[u8; 32]> {
     Some(portfolio[OWNER_OFF..OWNER_OFF + 32].try_into().unwrap())
 }
 
+/// Whether the portfolio holds a leg of the asset of this generation: such a portfolio has to be cranked after the
+/// asset's mark moves before anyone can add risk to the asset.
+pub fn holds_leg(portfolio: &[u8], asset_index: u16, market_id: u64) -> bool {
+    portfolio_owner(portfolio).is_some()
+        && (0..LEGS).any(|k| {
+            let o = LEGS_OFF + k * LEG_LEN;
+            portfolio[o + LEG_ACTIVE] == 1 && u32_at(portfolio, o + LEG_ASSET) == asset_index as u32 && u64_at(portfolio, o + LEG_MARKET_ID) == market_id
+        })
+}
+
 /// The portfolio's signed position in the asset (positive long) as the engine counts it when it trades: the raw
 /// basis scaled by the side's ADL index since the leg was opened, rounded up (`effective_abs_quantity_for_leg`). A leg
 /// from before a side reset holds nothing. None for an account that is not a portfolio or a leg the engine would
@@ -192,6 +204,10 @@ mod tests {
             (LEG_A_BASIS, offset_of!(PortfolioLegV16Account, a_basis)),
             (LEG_EPOCH, offset_of!(PortfolioLegV16Account, epoch_snap)),
             (PORTFOLIO_LEN, constants::PORTFOLIO_ENGINE_ACCOUNT_LEN),
+            (
+                PORTFOLIO_MARKET_OFF,
+                HEADER_LEN + offset_of!(PortfolioAccountV16Account, provenance_header) + offset_of!(percolator::ProvenanceHeaderV16Account, market_group_id),
+            ),
         ] {
             assert_eq!(ours, theirs);
         }
@@ -246,6 +262,20 @@ mod tests {
         d[o + LEG_A_BASIS..o + LEG_A_BASIS + 16].copy_from_slice(&a_basis.to_le_bytes());
         d[o + LEG_EPOCH..o + LEG_EPOCH + 8].copy_from_slice(&epoch.to_le_bytes());
         d
+    }
+
+    #[test]
+    fn a_portfolio_names_its_market_and_its_legs() {
+        let (_, group) = state::read_market(MARKET).unwrap();
+        let a = asset(MARKET, 0).unwrap();
+        let theirs = state::read_portfolio(TRADER).unwrap();
+        assert_eq!(TRADER[PORTFOLIO_MARKET_OFF..PORTFOLIO_MARKET_OFF + 32], theirs.provenance_header.market_group_id);
+        assert_eq!(group.market_group_id, theirs.provenance_header.market_group_id);
+        assert!(!holds_leg(TRADER, 0, a.market_id), "the devnet trader held nothing when it was read");
+        let d = with_leg(&a, true, 5_000_000, ADL_ONE, a.epoch_long);
+        assert!(holds_leg(&d, 0, a.market_id));
+        assert!(!holds_leg(&d, 0, a.market_id + 1));
+        assert!(!holds_leg(MARKET, 0, a.market_id));
     }
 
     #[test]
