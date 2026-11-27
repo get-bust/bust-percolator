@@ -26,21 +26,23 @@
 //!   perc feed update                one feed update
 //!   perc feed run <secs> [micro_lamports]
 //!                                   the keeper: an update every <secs> seconds, priced at [micro_lamports] a
-//!                                   compute unit (default 1,000)
+//!                                   compute unit (default 1,000), with a matcher sample when there is a matcher
 //!   perc feed show                  the feed and the asset's mark target
-//!   perc matcher init <oi_cap_bps> <max_gap_bps>
+//!   perc matcher init <oi_cap_bps> <max_gap_bps> <paid_max_gap_bps> <window_secs>
 //!                                   open the on-chain matcher's context for the house portfolio and enable it there
-//!   perc matcher params <oi_cap_bps> <max_gap_bps>
+//!                                   (open interest cap, the gap left free, the widest gap sold, the sample window)
+//!   perc matcher params <oi_cap_bps> <max_gap_bps> <paid_max_gap_bps> <window_secs>
 //!                                   change the house's rules
+//!   perc matcher observe            sample the pool into the context (the keeper does it with each update)
 //!   perc matcher trade <contracts> [update]
 //!                                   the trader trades through the matcher, signing alone ([update]: a feed update
 //!                                   first, in the same transaction)
 //!   perc matcher show               the context and its last snapshot
 //!   perc matcher attack             simulate the ways around the snapshot; each must be refused
 //!   perc order <contracts> [max_fee_bps]
-//!                                   an order as the app places it: through the matcher, and if it refuses an open
-//!                                   for the gap, a paid entry the house co-signs at a fee of up to [max_fee_bps]
-//!                                   (default 0: never pay)
+//!                                   an order as the app places it, through the matcher and signed by the trader
+//!                                   alone; an open past the free gap pays the gap to the house in the same
+//!                                   transaction, if that is at most [max_fee_bps] of its notional (default 0: never)
 //!   perc probe <rpc> <pool> <quote_mint>
 //!                                   read any cluster's pool with the feed's layouts: reserves and price
 //!
@@ -110,12 +112,17 @@ fn main() -> Result<()> {
             _ => bail!("feed: init | take | release | close | update | run | show"),
         },
         Some("matcher") => match arg(1)?.as_str() {
-            "init" => matcher::init(&c, arg(2)?.parse()?, arg(3)?.parse()?),
-            "params" => matcher::params(&c, arg(2)?.parse()?, arg(3)?.parse()?),
+            "init" => matcher::init(&c, arg(2)?.parse()?, arg(3)?.parse()?, arg(4)?.parse()?, arg(5)?.parse()?),
+            "params" => matcher::params(&c, arg(2)?.parse()?, arg(3)?.parse()?, arg(4)?.parse()?, arg(5)?.parse()?),
+            "observe" => {
+                let st = read_state()?;
+                println!("{}", c.send(vec![matcher::observe_ix(&c, &st)?], &[&c.house])?);
+                matcher::show_context(&c)
+            }
             "trade" => matcher::trade(&c, arg(2)?.parse()?, arg(3).is_ok_and(|a| a == "update")),
             "show" => matcher::show_context(&c),
             "attack" => matcher::attack(&c),
-            _ => bail!("matcher: init | params | trade | show | attack"),
+            _ => bail!("matcher: init | params | observe | trade | show | attack"),
         },
         Some("order") => order::order(&c, arg(1)?.parse()?, arg(2).map(|a| a.parse()).unwrap_or(Ok(0))?),
         Some("record") => record::record(&c, &read_state()?, arg(1)?.parse()?, arg(2)?.parse()?),

@@ -175,6 +175,8 @@ fn read_pool_file(name: &str) -> Result<Value> {
 
 /// An update uses about 16,100 compute units, Percolator's PushAuthMark included; the keeper asks for a little more.
 const UPDATE_UNITS: u32 = 25_000;
+/// A matcher sample with it: 5,642 units on devnet.
+const OBSERVE_UNITS: u32 = 8_000;
 
 /// One update: the feed reads the pool, adds an observation and pushes the average.
 pub fn update(c: &Ctx) -> Result<String> {
@@ -186,11 +188,24 @@ pub fn update(c: &Ctx) -> Result<String> {
 /// unit. A call refused as too soon is skipped; a stretch of a minute without an update is reported, since the
 /// average then holds the last price and Percolator's staleness rules start to count.
 pub fn run(c: &Ctx, secs: u64, micro_lamports: u64) -> Result<()> {
-    let fee = 5_000 + UPDATE_UNITS as u64 * micro_lamports / 1_000_000;
+    let observes = read_state().is_ok_and(|st| st.get("matcherCtx").is_some());
+    let fee = 5_000 + (UPDATE_UNITS + if observes { OBSERVE_UNITS } else { 0 }) as u64 * micro_lamports / 1_000_000;
     println!("an update every {secs} s at {fee} lamports: {:.4} SOL a day", fee as f64 * 86_400.0 / secs as f64 / 1e9);
     let mut last_ok = std::time::Instant::now();
     loop {
-        let sent = read_state().and_then(|st| update_ix(c, &st)).and_then(|ix| c.send_with_budget(vec![ix], &[&c.house], UPDATE_UNITS, micro_lamports));
+        // the matcher samples the pool in the same transaction, one the trader cannot shape
+        let sent = read_state()
+            .and_then(|st| {
+                let mut ixs = vec![update_ix(c, &st)?];
+                if st.get("matcherCtx").is_some() {
+                    ixs.push(crate::matcher::observe_ix(c, &st)?);
+                }
+                Ok(ixs)
+            })
+            .and_then(|ixs| {
+                let units = UPDATE_UNITS + if ixs.len() > 1 { OBSERVE_UNITS } else { 0 };
+                c.send_with_budget(ixs, &[&c.house], units, micro_lamports)
+            });
         match sent {
             Ok(sig) => {
                 last_ok = std::time::Instant::now();

@@ -1,39 +1,36 @@
-//! One order, placed the way the app places it: through the matcher first, where the trader signs alone and the
-//! house charges nothing of its own. If the matcher refuses an open because the pool has run past the mark by more
-//! than its gap limit, the house quotes a paid entry: it co-signs a `TradeNoCpi` with the gap as the fee, so the trader
-//! enters as if at the pool's price (`bust_matcher::rules::paid_entry`). The trader caps the fee it accepts.
+//! One order, placed the way the app places it: through the matcher, signed by the trader alone. When the pool has
+//! run past the mark by more than the free gap on the side the order opens, the matcher fills that open only as far
+//! as the gap is paid, with a token transfer from the trader to the house's fee account in the same transaction; the
+//! trader enters as if at the pool's price, and caps the fee it pays. The house signs nothing.
 //!
-//! Only the paid entry needs the house to answer. If it does not, every other order still goes through the matcher.
-//! Percolator revokes the matcher on the house portfolio whenever that portfolio trades outside it, so the paid entry
-//! enables it again in the same transaction.
+//! The fee is worked out here with the matcher's own rules, against the same reading (`rules::fill`), with a little
+//! room for the pool moving before the transaction lands: what the fee does not cover is left unfilled, never charged.
 
 use crate::{
-    ctx::{eng, pk, read_state, root, Ctx},
+    ctx::{pk, read_state, Ctx},
     mark::crank_ix,
     market::show,
-    matcher::{enable_ix, filled_in, simulate, show_context, trade_ixs, Sim},
+    matcher::{context_key, filled_in, show_context, simulate, trade_ixs, Sim},
 };
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Result};
 use bust_mark::Feed;
 use bust_matcher::{
-    context_address, layout,
-    rules::{paid_entry, PaidEntry, Pool, Snapshot},
+    layout,
+    rules::{self, fee_for, gap, oi_cap_q, Pool, Snapshot, POS_SCALE},
     Context,
 };
-use percolator_prog::{ix::Instruction as Ix, state};
 use serde_json::Value;
-use solana_sdk::{instruction::AccountMeta, pubkey::Pubkey, signature::Signer};
+use solana_sdk::{pubkey::Pubkey, signature::Signer};
 
-const POS_SCALE: f64 = 1_000_000.0;
-/// The widest gap the house sells as a paid entry when devnet.json names none, in basis points.
-const PAID_MAX_GAP_BPS: u64 = 2_000;
+/// The fee is sized for a price this much worse than the one read, in basis points of the gap.
+const FEE_ROOM_BPS: u128 = 200;
 
 /// What the matcher's `Prepare` would read now, read off chain the same way, with the mark it would trade at.
-fn snapshot(c: &Ctx, st: &Value, trader_portfolio: &Pubkey) -> Result<(Snapshot, Context, u64)> {
+pub fn snapshot(c: &Ctx, st: &Value, trader_portfolio: &Pubkey) -> Result<(Snapshot, Context, u64)> {
     let market = pk(st, "market")?;
-    let ctx = Context::load(&c.data(&context_address(&market, &pk(st, "housePortfolio")?, &c.house.pubkey()).0)?)?;
-    let asset = layout::asset(&c.data(&market)?, ctx.asset_index).ok_or_else(|| anyhow::anyhow!("not a market"))?;
-    let position_q = layout::position(&c.data(trader_portfolio)?, ctx.asset_index, &asset).ok_or_else(|| anyhow::anyhow!("not a portfolio"))?;
+    let ctx = Context::load(&c.data(&context_key(c, st)?)?)?;
+    let asset = layout::asset(&c.data(&market)?, ctx.asset_index).ok_or_else(|| anyhow!("not a market"))?;
+    let position_q = layout::position(&c.data(trader_portfolio)?, ctx.asset_index, &asset).ok_or_else(|| anyhow!("not a portfolio"))?;
     let feed = Feed::load(&c.data(&ctx.feed)?)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
     let amount = |k: &Pubkey| -> Result<u64> { Ok(c.rpc.get_token_account_balance(k)?.amount.parse()?) };
@@ -44,121 +41,92 @@ fn snapshot(c: &Ctx, st: &Value, trader_portfolio: &Pubkey) -> Result<(Snapshot,
     };
     let pool = bust_mark::read_pool(&feed, &c.data(&feed.pool)?, amount(&feed.base_vault)?, amount(&feed.quote_vault)?, price, now)
         .ok()
-        .map(|(base_reserve, spot)| Pool { base_reserve, spot });
-    let snap = Snapshot { position_q, oi_long_q: asset.oi_long_q, oi_short_q: asset.oi_short_q, pool, contract_base_atoms: feed.contract_base_atoms };
+        .map(|(base_reserve, spot)| {
+            let (high, low) = rules::range(&ctx.buckets, ctx.window_secs, now, spot);
+            Pool { base_reserve, spot, high, low }
+        });
+    let snap = Snapshot {
+        position_q,
+        oi_long_q: asset.oi_long_q,
+        oi_short_q: asset.oi_short_q,
+        pool,
+        contract_base_atoms: feed.contract_base_atoms,
+        fee_paid: 0,
+        sampled: now - ctx.last_observed <= ctx.window_secs as i64,
+    };
     Ok((snap, ctx, asset.effective_price))
 }
 
-fn paid_max_gap_bps() -> u64 {
-    std::fs::read_to_string(root().join("devnet.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|cfg| cfg["matcher"]["paidMaxGapBps"].as_u64())
-        .unwrap_or(PAID_MAX_GAP_BPS)
+/// The fee that lets the open part of `size_q` past the free gap, with room, and the part it pays for; zero when
+/// nothing past the free gap is opened.
+pub fn gap_fee(snap: &Snapshot, ctx: &Context, mark: u64, size_q: i128) -> (u64, u128) {
+    let Some(pool) = snap.pool else { return (0, 0) };
+    let long = size_q > 0;
+    let (gap_atoms, gap_bps) = gap(&pool, mark, long);
+    if gap_bps <= ctx.max_gap_bps || gap_bps > ctx.paid_max_gap_bps {
+        return (0, 0);
+    }
+    let closing = if snap.position_q != 0 && (snap.position_q > 0) != long { size_q.unsigned_abs().min(snap.position_q.unsigned_abs()) } else { 0 };
+    let side = if long { snap.oi_long_q } else { snap.oi_short_q };
+    let room = oi_cap_q(&pool, mark, snap.contract_base_atoms, ctx.oi_cap_bps).saturating_sub(side);
+    let opening = (size_q.unsigned_abs() - closing).min(room);
+    let with_room = gap_atoms as u128 * (10_000 + FEE_ROOM_BPS) / 10_000;
+    (fee_for(opening, with_room.min(u64::MAX as u128) as u64), opening)
 }
 
-/// The house's quote for a paid entry, read after a crank that brings both portfolios and the mark to this slot. The
-/// house signs only what this returns: in production this runs on its side, against the chain, not the trader's word.
-pub fn house_quote(c: &Ctx, st: &Value, trader_portfolio: &Pubkey, size_q: i128) -> Result<(PaidEntry, u64)> {
-    let market = pk(st, "market")?;
-    let slot = c.rpc.get_slot()?;
-    c.send(vec![crank_ix(c, &c.house.pubkey(), market, *trader_portfolio, slot), crank_ix(c, &c.house.pubkey(), market, pk(st, "housePortfolio")?, slot)], &[&c.house])?;
-    let (snap, ctx, mark) = snapshot(c, st, trader_portfolio)?;
-    let (cfg, group) = eng(state::read_market(&c.data(&market)?))?;
-    let entry = paid_entry(&snap, &ctx.params(), paid_max_gap_bps(), cfg.trade_fee_base_bps, group.config.max_trading_fee_bps, mark, size_q)
-        .map_err(|r| anyhow::anyhow!("the house does not sell this entry: {r:?} (pool {:?}, mark {mark})", snap.pool.map(|p| p.spot)))?;
-    Ok((entry, mark))
-}
-
-/// Places an order of `contracts` (positive: long); a paid entry is taken only at a fee of `max_fee_bps` or less.
+/// Places an order of `contracts` (positive: long), paying the gap only up to `max_fee_bps` of what it opens.
 pub fn order(c: &Ctx, contracts: f64, max_fee_bps: u64) -> Result<()> {
     let st = read_state()?;
     let trader = c.trader.pubkey();
     let portfolio = pk(&st, "traderPortfolio")?;
-    let size_q = (contracts * POS_SCALE).round() as i128;
+    let size_q = (contracts * POS_SCALE as f64).round() as i128;
+    let market = pk(&st, "market")?;
 
-    // 1) the matcher: whatever it fills, at no fee of the house's
-    let ixs = trade_ixs(c, &st, &trader, portfolio, size_q, false)?;
-    let mut left = match simulate(c, &ixs, &c.trader)? {
+    // both portfolios and the mark to this slot first, so the reading below is the one the trade meets
+    let slot = c.rpc.get_slot()?;
+    c.send(vec![crank_ix(c, &trader, market, portfolio, slot), crank_ix(c, &trader, market, pk(&st, "housePortfolio")?, slot)], &[&c.trader])?;
+    let (snap, ctx, mark) = snapshot(c, &st, &portfolio)?;
+    let free = rules::fill(&snap, &ctx.params(), mark, size_q);
+    let (fee, paid_q) = gap_fee(&snap, &ctx, mark, size_q);
+    let mut pay = 0;
+    if fee > 0 {
+        let notional = paid_q as f64 / POS_SCALE as f64 * mark as f64;
+        let fee_bps = (fee as f64 / notional * 1e4).ceil() as u64;
+        println!(
+            "the pool is {:.2}% past the mark on this side: {} contracts open only with the gap paid, {:.6} USDC ({fee_bps} bps)",
+            gap(&snap.pool.unwrap(), mark, size_q > 0).1 as f64 / 100.0,
+            paid_q as f64 / POS_SCALE as f64,
+            fee as f64 / 1e6
+        );
+        if fee_bps <= max_fee_bps {
+            pay = fee;
+        } else {
+            println!("that is above the {max_fee_bps} bps you accept: the order goes without it");
+        }
+    }
+    if pay == 0 {
+        if let Err(r) = free {
+            println!("the matcher would refuse it: {r:?}");
+            return show(c);
+        }
+    }
+
+    let ixs = trade_ixs(c, &st, &trader, portfolio, size_q, false, pay)?;
+    match simulate(c, &ixs, &c.trader)? {
         Sim::Passed { units, logs } => {
             let filled = filled_in(&logs).unwrap_or(size_q);
             let limit = (units * 6 / 5).min(1_400_000) as u32;
             let sig = c.send_with_budget(ixs, &[&c.trader], limit, 1_000)?;
-            println!("matcher filled {} of {contracts} contracts, signed by the trader alone: {sig}", filled as f64 / POS_SCALE);
-            size_q - filled
+            println!(
+                "filled {} of {contracts} contracts{}, signed by the trader alone: {sig}",
+                filled as f64 / POS_SCALE as f64,
+                if pay > 0 { format!(", {:.6} USDC paid for the gap", pay as f64 / 1e6) } else { String::new() }
+            );
         }
-        // the matcher's own refusal for the gap (its error codes overlap Percolator's, so its log tells them apart)
-        Sim::Failed { logs, .. } if logs.iter().any(|l| l.starts_with("Program log: refused: Gap")) => {
-            let why = logs.iter().find(|l| l.contains("refused")).cloned().unwrap_or_default();
-            println!("matcher refused: the pool is past its gap limit on this side\n  {why}");
-            size_q
-        }
-        Sim::Failed { error, logs, .. } => {
+        Sim::Failed { error, logs } => {
             let why = logs.iter().find(|l| l.contains("refused")).cloned().unwrap_or(error);
-            bail!("the matcher refused the order: {why}");
+            println!("not sent: {why}");
         }
-    };
-    if left == 0 {
-        return show(c);
-    }
-
-    // 2) a paid entry for what is left, if the gap is why
-    let (entry, mark) = match house_quote(c, &st, &portfolio, left) {
-        Ok(q) => q,
-        Err(e) => {
-            println!("{e}");
-            return show(c);
-        }
-    };
-    let fee_usdc = entry.size_q.unsigned_abs() as f64 / POS_SCALE * mark as f64 / 1e6 * entry.fee_bps as f64 / 1e4;
-    println!(
-        "house quote: {} contracts at a fee of {} bps ({fee_usdc:.6} USDC), the gap to the pool plus the market's base fee",
-        entry.size_q as f64 / POS_SCALE,
-        entry.fee_bps
-    );
-    if entry.fee_bps > max_fee_bps {
-        println!("the fee is above the {max_fee_bps} bps you accept: not sent");
-        return show(c);
-    }
-
-    let market = pk(&st, "market")?;
-    let house = pk(&st, "housePortfolio")?;
-    let (td, hd) = (c.data(&portfolio)?, c.data(&house)?);
-    let (_, group) = eng(state::read_market(&c.data(&market)?))?;
-    let slot = c.rpc.get_slot()?;
-    let ixs = vec![
-        crank_ix(c, &trader, market, portfolio, slot),
-        crank_ix(c, &trader, market, house, slot),
-        c.prog(
-            Ix::TradeNoCpi {
-                account_a_portfolio_id: eng(state::read_portfolio_id(&td))?,
-                account_a_position_epoch: eng(state::read_portfolio_position_epoch(&td))?,
-                account_b_portfolio_id: eng(state::read_portfolio_id(&hd))?,
-                account_b_position_epoch: eng(state::read_portfolio_position_epoch(&hd))?,
-                asset_index: 0,
-                market_id: group.assets[0].market_id,
-                size_q: entry.size_q,
-                exec_price: mark,
-                fee_bps: entry.fee_bps,
-                backing_fee_cap_bps: 0,
-            },
-            vec![
-                AccountMeta::new(trader, true),
-                AccountMeta::new(c.house.pubkey(), true),
-                AccountMeta::new(market, false),
-                AccountMeta::new(portfolio, false),
-                AccountMeta::new(house, false),
-            ],
-        ),
-        // the trade moved the house portfolio outside the matcher, which revokes it: enable it again in the same
-        // transaction, at the position epoch the trade leaves
-        enable_ix(c, &st, eng(state::read_portfolio_position_epoch(&hd))? + 1, eng(state::read_portfolio_matcher_sequence(&hd))?)?,
-    ];
-    let sig = c.send(ixs, &[&c.trader, &c.house])?;
-    left -= entry.size_q;
-    println!("paid entry of {} contracts, signed by the trader and the house: {sig}", entry.size_q as f64 / POS_SCALE);
-    if left != 0 {
-        println!("{} contracts not filled: the open interest cap", left as f64 / POS_SCALE);
     }
     show_context(c)?;
     show(c)
