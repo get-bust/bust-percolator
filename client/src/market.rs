@@ -1,6 +1,6 @@
 //! Opening the market: the market group account, its vault, the authority mark, two portfolios and their deposits.
 
-use crate::ctx::{eng, load_or_new, pk, read_state, vault_accounts, write_state, Ctx};
+use crate::ctx::{eng, market_key, pk, read_state, vault_accounts, write_state, Ctx};
 use anyhow::Result;
 use percolator_prog::{
     constants::PORTFOLIO_ACCOUNT_LEN,
@@ -20,11 +20,13 @@ const HOUSE_DEPOSIT: u128 = 10_000_000_000;
 const INSURANCE: u128 = 1_000_000_000;
 
 /// Creates the market (or resumes an existing one), sets its first mark and opens and funds both portfolios.
-pub fn setup(c: &Ctx, initial_mark: u64) -> Result<()> {
+/// Opens the market. `move_bps_per_slot` and `accrual_dt_slots` set how fast the mark may move and how many slots a
+/// crank accrues; Percolator holds their product under the maintenance margin.
+pub fn setup(c: &Ctx, initial_mark: u64, move_bps_per_slot: u64, accrual_dt_slots: u64, max_funding_e9: u64) -> Result<()> {
     let mint = c.collateral;
-    let market_kp = load_or_new("market.json")?;
-    let house_pf = load_or_new("house-portfolio.json")?;
-    let trader_pf = load_or_new("trader-portfolio.json")?;
+    let market_kp = market_key("market.json")?;
+    let house_pf = market_key("house-portfolio.json")?;
+    let trader_pf = market_key("trader-portfolio.json")?;
     let market = market_kp.pubkey();
     let (vault_authority, vault) = vault_accounts(&c.program, &market, &mint);
 
@@ -52,8 +54,9 @@ pub fn setup(c: &Ctx, initial_mark: u64) -> Result<()> {
         )?;
         println!("market account and vault: {sig}");
 
-        // A memecoin profile: 10% initial margin (10x), 5% maintenance, the mark moves at most 10 bps per slot and
-        // at most 20 slots are accrued per crank, so one crank moves it at most 2%. A loser's payment backs the
+        // A memecoin profile: 10% initial margin (10x), 5% maintenance; the mark moves at most `move_bps_per_slot` a
+        // slot and at most `accrual_dt_slots` are accrued per crank (by default 10 bps and 20 slots, so one crank
+        // moves it at most 2%). A loser's payment backs the
         // winners' claims for the freshness horizon, the largest of h_max, the accrual window and the bankrupt-close
         // lifetime: 216,000 slots (about a day) gives a winner a day to convert its profit.
         let init = Ix::InitMarket {
@@ -70,10 +73,12 @@ pub fn setup(c: &Ctx, initial_mark: u64) -> Result<()> {
             liquidation_fee_bps: 0,
             liquidation_fee_cap: 0,
             min_liquidation_abs: 0,
-            max_price_move_bps_per_slot: 10,
-            max_accrual_dt_slots: 20,
-            max_abs_funding_e9_per_slot: 0,
-            min_funding_lifetime_slots: 20,
+            max_price_move_bps_per_slot: move_bps_per_slot,
+            max_accrual_dt_slots: accrual_dt_slots,
+            // an AuthMark asset charges no funding, but with a nonzero bound a trade accrues the asset to its slot
+            // itself (zero-move funding) instead of needing cranks in its transaction
+            max_abs_funding_e9_per_slot: max_funding_e9,
+            min_funding_lifetime_slots: accrual_dt_slots,
             max_account_b_settlement_chunks: 1,
             max_bankrupt_close_chunks: 1,
             max_bankrupt_close_lifetime_slots: 216_000,

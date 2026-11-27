@@ -12,9 +12,8 @@
 //! from the market, so it holds across all of them.
 
 use crate::{
-    ctx::{eng, load_or_new, pk, read_state, write_state, Ctx},
+    ctx::{eng, market_key, pk, read_state, write_state, Ctx},
     feed,
-    mark::crank_ix,
     market::show,
 };
 use anyhow::{bail, Result};
@@ -35,8 +34,6 @@ use solana_sdk::{
 const POS_SCALE: f64 = 1_000_000.0;
 /// The most the house lets Percolator charge it per trade through the matcher, in basis points.
 const TRADE_FEE_CAP_BPS: u16 = 100;
-/// Cranks a trade adds at most to bring the asset's accrual to its slot, beyond its two own.
-const MAX_TRADE_CATCH_UP: usize = 6;
 
 fn matcher_ix(tag: u8, fields: &[&[u8]], accounts: Vec<AccountMeta>) -> Instruction {
     let mut data = vec![tag];
@@ -63,6 +60,33 @@ pub fn shards(st: &Value) -> Result<Vec<Pubkey>> {
         all.push(v.as_str().unwrap_or_default().parse()?);
     }
     Ok(all)
+}
+
+/// The house portfolios in the order an order of `size_q` should try them: first those whose position it reduces (the
+/// house takes the other side, so a trader's close lands on a house portfolio holding the opposite of the trader's
+/// position), then the rest from a random start. Percolator weighs both sides of a trade: a close that adds to a house
+/// portfolio's position counts as adding risk and can wait while the asset is behind or its holders stale, a close
+/// that reduces both sides never does.
+pub fn shards_for(c: &Ctx, st: &Value, size_q: i128) -> Result<Vec<Pubkey>> {
+    let all = shards(st)?;
+    let market = c.data(&pk(st, "market")?)?;
+    let asset = bust_matcher::layout::asset(&market, 0).ok_or_else(|| anyhow::anyhow!("not a market"))?;
+    let accounts = c.rpc.get_multiple_accounts(&all)?;
+    let start = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.subsec_nanos() as usize % all.len();
+    let mut reducing = Vec::new();
+    let mut rest = Vec::new();
+    for k in 0..all.len() {
+        let i = (start + k) % all.len();
+        let held = accounts[i].as_ref().and_then(|a| bust_matcher::layout::position(&a.data, 0, &asset)).unwrap_or(0);
+        // the house portfolio takes -size_q: that reduces it when it holds the side of size_q, by at least the size
+        if held != 0 && held.signum() == size_q.signum() && held.unsigned_abs() >= size_q.unsigned_abs() {
+            reducing.push(all[i]);
+        } else {
+            rest.push(all[i]);
+        }
+    }
+    reducing.extend(rest);
+    Ok(reducing)
 }
 
 /// The context of the first house portfolio, whose settings every shard copies.
@@ -130,7 +154,7 @@ pub fn add_shards(c: &Ctx, n: usize, usdc: u64) -> Result<()> {
     let rent = c.rpc.get_minimum_balance_for_rent_exemption(percolator_prog::constants::PORTFOLIO_ACCOUNT_LEN)?;
     for _ in 0..n {
         let index = shards(&st)?.len();
-        let pf = load_or_new(&format!("house-portfolio-{index}.json"))?;
+        let pf = market_key(&format!("house-portfolio-{index}.json"))?;
         let tokens = spl_associated_token_account::get_associated_token_address(&c.house.pubkey(), &mint);
         let sig = c.send(
             vec![
@@ -232,8 +256,7 @@ fn observe_ix(c: &Ctx, st: &Value, house: &Pubkey) -> Result<Instruction> {
 }
 
 /// The instructions of one matcher trade against the house portfolio `house`, signed by `trader` alone: an optional
-/// feed update, cranks of both portfolios to this slot, the gap's fee as a transfer to the house when `fee` is not
-/// zero, `Prepare`, and `TradeCpi`.
+/// feed update, the gap's fee as a transfer to the house when `fee` is not zero, `Prepare`, and `TradeCpi`.
 #[allow(clippy::too_many_arguments)]
 pub fn trade_ixs(c: &Ctx, st: &Value, trader: &Pubkey, trader_portfolio: Pubkey, house: Pubkey, size_q: i128, with_update: bool, fee: u64) -> Result<Vec<Instruction>> {
     let market = pk(st, "market")?;
@@ -245,17 +268,8 @@ pub fn trade_ixs(c: &Ctx, st: &Value, trader: &Pubkey, trader_portfolio: Pubkey,
     if with_update {
         ixs.push(feed::update_ix(c, st)?);
     }
-    let slot = c.rpc.get_slot()?;
-    ixs.push(crank_ix(c, trader, market, trader_portfolio, slot));
-    ixs.push(crank_ix(c, trader, market, house, slot));
-    // the asset's accrual must reach the slot the trade lands in, and a crank moves it at most max_accrual_dt_slots:
-    // the keeper keeps it close, so the two cranks above usually do; only a wider lag adds cranks, none to spare
-    for extra in crate::mark::catch_up_ixs(c, st, MAX_TRADE_CATCH_UP, 2)? {
-        let mut extra = extra;
-        extra.accounts[0] = AccountMeta::new(*trader, true);
-        ixs.push(extra);
-    }
-
+    // no cranks: the trade settles and refreshes both of its portfolios itself, and the keeper settles the market
+    // after each mark (`mark::settle`); a crank that finds nothing to do would fail the trade (`EngineNonProgress`)
     if fee > 0 {
         // the instruction right before Prepare: Prepare reads what it paid
         let from = spl_associated_token_account::get_associated_token_address(trader, &c.collateral);

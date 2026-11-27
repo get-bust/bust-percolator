@@ -31,12 +31,26 @@ fn read_keypair(path: &PathBuf) -> Result<Keypair> {
 }
 
 /// A keypair under keys/, created on first use.
+/// The market being worked on: `PERC_MARKET` names a second market beside the first, with a state file and keys of
+/// its own (`state/perc-<name>.json`, `keys/<name>/`). Wallet keys (the trader's, the racers') are shared.
+pub fn profile() -> Option<String> {
+    std::env::var("PERC_MARKET").ok().filter(|p| !p.is_empty())
+}
+
+/// A key that belongs to the market (its account, its portfolios), under the market's own directory.
+pub fn market_key(name: &str) -> Result<Keypair> {
+    match profile() {
+        Some(p) => load_or_new(&format!("{p}/{name}")),
+        None => load_or_new(name),
+    }
+}
+
 pub fn load_or_new(name: &str) -> Result<Keypair> {
     let path = root().join("keys").join(name);
     if path.exists() {
         return read_keypair(&path);
     }
-    fs::create_dir_all(root().join("keys"))?;
+    fs::create_dir_all(path.parent().unwrap_or(&root().join("keys")))?;
     let k = Keypair::new();
     fs::write(&path, serde_json::to_string(&k.to_bytes().to_vec())?)?;
     Ok(k)
@@ -52,11 +66,14 @@ pub fn eng<T>(r: Result<T, ProgramError>) -> Result<T> {
 }
 
 pub fn state_path() -> PathBuf {
-    root().join("state/perc.json")
+    match profile() {
+        Some(p) => root().join(format!("state/perc-{p}.json")),
+        None => root().join("state/perc.json"),
+    }
 }
 
 pub fn read_state() -> Result<Value> {
-    Ok(serde_json::from_str(&fs::read_to_string(state_path()).context("no state/perc.json: run setup first")?)?)
+    Ok(serde_json::from_str(&fs::read_to_string(state_path()).context("no state file for this market: run setup first")?)?)
 }
 
 pub fn write_state(st: &Value) -> Result<()> {

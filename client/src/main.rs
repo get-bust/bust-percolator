@@ -4,7 +4,13 @@
 //! and collateralised in a devnet test USDC. One contract is 1,000,000 coins; marks are collateral atoms per
 //! contract. The house is the market authority, the oracle authority and the trader's counterparty.
 //!
-//!   perc setup <mark_e6>            open the market, set its first mark, open and fund both portfolios
+//!   perc setup <mark_e6> [move_bps_per_slot] [accrual_dt_slots] [max_funding_e9]
+//!                                   open the market, set its first mark, open and fund both portfolios; the mark may
+//!                                   move [move_bps_per_slot] a slot (default 10), a crank accrues at most
+//!                                   [accrual_dt_slots] (default 20), and a nonzero [max_funding_e9] lets a trade accrue
+//!                                   the asset itself
+//!
+//! PERC_MARKET=<name> works on a second market beside the first, with its own state file and market keys.
 //!   perc show                       the mark, open interest and both portfolios
 //!   perc deposit <usdc>             the trader deposits more collateral
 //!   perc back <usdc>                the house backs each side of the asset with <usdc>
@@ -50,6 +56,9 @@
 //!                                   an order as the app places it, through the matcher and signed by the trader
 //!                                   alone; an open past the free gap pays the gap to the house in the same
 //!                                   transaction, if that is at most [max_fee_bps] of its notional (default 0: never)
+//!   perc study <tag> <minutes> <every_secs> [retries]
+//!                                   beside a running keeper: open and close every <every_secs> for <minutes>, and
+//!                                   how often an open goes through (state/study-<tag>.jsonl)
 //!   perc probe <rpc> <pool> <quote_mint>
 //!                                   read any cluster's pool with the feed's layouts: reserves and price
 //!
@@ -64,6 +73,7 @@ mod mark;
 mod matcher;
 mod order;
 mod race;
+mod study;
 mod trade;
 mod record;
 
@@ -86,7 +96,13 @@ fn main() -> Result<()> {
     }
     let c = Ctx::new()?;
     match args.first().map(String::as_str) {
-        Some("setup") => market::setup(&c, arg(1)?.parse()?),
+        Some("setup") => market::setup(
+            &c,
+            arg(1)?.parse()?,
+            arg(2).map(|a| a.parse()).unwrap_or(Ok(10))?,
+            arg(3).map(|a| a.parse()).unwrap_or(Ok(20))?,
+            arg(4).map(|a| a.parse()).unwrap_or(Ok(0))?,
+        ),
         Some("show") => market::show(&c),
         Some("deposit") => {
             market::deposit(&c, &read_state()?, false, usdc(&arg(1)?)?)?;
@@ -99,6 +115,10 @@ fn main() -> Result<()> {
             market::show(&c)
         }
         Some("catch-up") => mark::catch_up(&c, &read_state()?),
+        Some("settle") => {
+            println!("{:?}", mark::settle(&c, &read_state()?, 1_000)?);
+            Ok(())
+        }
         Some("holders") => {
             for h in mark::holders(&c, &read_state()?)? {
                 println!("{h}");
@@ -141,6 +161,7 @@ fn main() -> Result<()> {
             "attack" => matcher::attack(&c),
             _ => bail!("matcher: init | params | observe | shards | trade | race | show | attack"),
         },
+        Some("study") => study::study(&c, &arg(1)?, arg(2)?.parse()?, arg(3)?.parse()?, arg(4).map(|a| a.parse()).unwrap_or(Ok(3))?),
         Some("order") => order::order(&c, arg(1)?.parse()?, arg(2).map(|a| a.parse()).unwrap_or(Ok(0))?),
         Some("record") => record::record(&c, &read_state()?, arg(1)?.parse()?, arg(2)?.parse()?),
         _ => bail!("unknown command; see the list at the top of client/src/main.rs"),

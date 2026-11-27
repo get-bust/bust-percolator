@@ -144,9 +144,8 @@ pub fn accrual_lag(c: &Ctx, market: &Pubkey) -> Result<(u64, u64)> {
     Ok((behind, group.config.max_accrual_dt_slots.max(1)))
 }
 
-/// The portfolios that hold a leg of asset 0: after the mark moves, every one of them has to be cranked before anyone
-/// can add risk to the asset (Percolator counts their positions as stale until then).
-pub fn holders(c: &Ctx, st: &Value) -> Result<Vec<Pubkey>> {
+/// The portfolios that hold a leg of asset 0, with their data.
+pub fn holder_accounts(c: &Ctx, st: &Value) -> Result<Vec<(Pubkey, Vec<u8>)>> {
     use solana_client::{
         rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
         rpc_filter::{Memcmp, RpcFilterType},
@@ -161,26 +160,83 @@ pub fn holders(c: &Ctx, st: &Value) -> Result<Vec<Pubkey>> {
         account_config: RpcAccountInfoConfig { encoding: Some(solana_account_decoder::UiAccountEncoding::Base64), ..Default::default() },
         ..Default::default()
     };
-    let accounts = c.rpc.get_program_accounts_with_config(&c.program, config)?;
-    Ok(accounts
+    Ok(c.rpc
+        .get_program_accounts_with_config(&c.program, config)?
         .into_iter()
         .filter(|(_, a)| bust_matcher::layout::holds_leg(&a.data, 0, group.assets[0].market_id))
-        .map(|(k, _)| k)
+        .map(|(k, a)| (k, a.data))
         .collect())
 }
 
-/// Cranks enough to bring the asset's accrual to the chain's slot, at most `cap`; `already` cranks the transaction
-/// sends anyway count toward it. None to spare: a crank with no slot left to accrue fails (`EngineNonProgress`) while
-/// the price is still moving toward a new mark.
-pub fn catch_up_ixs(c: &Ctx, st: &Value, cap: usize, already: usize) -> Result<Vec<Instruction>> {
-    let market = pk(st, "market")?;
-    let (behind, dt) = accrual_lag(c, &market)?;
-    let n = (behind.div_ceil(dt) as usize).saturating_sub(already).min(cap);
-    let slot = c.rpc.get_slot()?;
-    let house = pk(st, "housePortfolio")?;
-    // the slot field is not read on chain; varying it keeps identical cranks in one batch apart
-    Ok((0..n as u64).map(|k| crank_ix(c, &c.house.pubkey(), market, house, slot + k)).collect())
+/// The portfolios that hold a leg of asset 0.
+pub fn holders(c: &Ctx, st: &Value) -> Result<Vec<Pubkey>> {
+    Ok(holder_accounts(c, st)?.into_iter().map(|(k, _)| k).collect())
 }
+
+/// The holders whose leg was settled before its side's last K/F change: Percolator refuses any trade that adds risk on
+/// the asset until each of them is cranked.
+pub fn stale_holders(c: &Ctx, st: &Value) -> Result<Vec<Pubkey>> {
+    let asset = bust_matcher::layout::asset(&c.data(&pk(st, "market")?)?, 0).ok_or_else(|| anyhow::anyhow!("not a market"))?;
+    Ok(holder_accounts(c, st)?.into_iter().filter(|(_, d)| bust_matcher::layout::leg_stale(d, 0, &asset)).map(|(k, _)| k).collect())
+}
+
+/// What `settle` sent: transactions through, refused as having nothing to do (another crank did it first), failed.
+#[derive(Default, Debug)]
+pub struct Settled {
+    pub ok: u32,
+    pub idle: u32,
+    pub failed: u32,
+}
+
+fn settle_send(c: &Ctx, ixs: Vec<Instruction>, units: u32, micro_lamports: u64, out: &mut Settled) {
+    match c.send_with_budget(ixs, &[&c.house], units, micro_lamports) {
+        Ok(_) => out.ok += 1,
+        Err(e) if e.to_string().split_whitespace().collect::<String>().contains("Custom(22)") => out.idle += 1,
+        Err(e) => {
+            out.failed += 1;
+            let flat = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
+            println!("settle: {}", flat.find("InstructionError").map_or(flat.as_str(), |i| &flat[i..]).chars().take(90).collect::<String>());
+        }
+    }
+}
+
+/// Brings the market back to where a trade that adds risk goes through, after a mark: accrues the asset to the
+/// market's slot, which moves its price toward the mark (a crank accrues at most `max_accrual_dt_slots`, so it sends
+/// as many as the gap needs and checks), until the price has caught up and no accrual is left half done; then cranks
+/// every holder the move left stale, each in a transaction of its own, so one that another crank settled first
+/// (`EngineNonProgress`) does not take the others down with it. Between marks nothing moves, and nothing needs it.
+pub fn settle(c: &Ctx, st: &Value, micro_lamports: u64) -> Result<Settled> {
+    let market = pk(st, "market")?;
+    let house = pk(st, "housePortfolio")?;
+    let mut out = Settled::default();
+    for _ in 0..6 {
+        let (_, group) = eng(state::read_market(&c.data(&market)?))?;
+        let a = &group.assets[0];
+        let behind_market = group.current_slot.saturating_sub(a.slot_last);
+        if a.raw_oracle_target_price == a.effective_price && behind_market == 0 {
+            break;
+        }
+        let slot = c.rpc.get_slot()?;
+        let gap = slot.saturating_sub(a.slot_last).max(1);
+        let n = (gap.div_ceil(group.config.max_accrual_dt_slots.max(1)) as usize).clamp(1, 12);
+        let ixs = (0..n as u64).map(|k| crank_ix(c, &c.house.pubkey(), market, house, slot + k)).collect();
+        settle_send(c, ixs, (CRANK_UNITS * 2 * n as u32).min(1_400_000), micro_lamports, &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // the asset's own counts say whether anyone is stale; a leg's epoch alone over-counts (it can trail its side's
+    // epoch without being counted)
+    let (_, group) = eng(state::read_market(&c.data(&market)?))?;
+    if group.assets[0].stale_account_count_long + group.assets[0].stale_account_count_short == 0 {
+        return Ok(out);
+    }
+    let slot = c.rpc.get_slot()?;
+    for h in stale_holders(c, st)? {
+        // a holder's crank after a price move settles its profit and loss: more than a plain crank
+        settle_send(c, vec![crank_ix(c, &c.house.pubkey(), market, h, slot)], 400_000, micro_lamports, &mut out);
+    }
+    Ok(out)
+}
+
 
 /// Brings an asset that was left uncranked back to the chain's slot. Percolator accrues an asset at most
 /// `max_accrual_dt_slots` slots a crank; once the asset has open interest, a trade that adds risk is refused while it
@@ -220,19 +276,4 @@ pub fn catch_up(c: &Ctx, st: &Value) -> Result<()> {
     }
 }
 
-/// Whether a crank since the last mark moved the price and left the asset's holders stale.
-pub fn holders_stale(c: &Ctx, market: &Pubkey) -> Result<bool> {
-    let (_, group) = eng(state::read_market(&c.data(market)?))?;
-    let a = &group.assets[0];
-    Ok(a.stale_account_count_long != 0 || a.stale_account_count_short != 0)
-}
 
-/// Cranks that bring the asset to the chain's slot and then every holder, which a price move left stale.
-pub fn refresh_ixs(c: &Ctx, st: &Value, cap: usize) -> Result<Vec<Instruction>> {
-    let market = pk(st, "market")?;
-    let slot = c.rpc.get_slot()?;
-    let mut ixs = catch_up_ixs(c, st, cap, 0)?;
-    let room = cap.saturating_sub(ixs.len());
-    ixs.extend(holders(c, st)?.into_iter().take(room).map(|h| crank_ix(c, &c.house.pubkey(), market, h, slot)));
-    Ok(ixs)
-}

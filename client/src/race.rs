@@ -34,7 +34,7 @@ fn racers(c: &Ctx, st: &Value, n: usize) -> Result<Vec<(Keypair, Pubkey)>> {
     let mut out = Vec::new();
     for k in 0..n {
         let racer = load_or_new(&format!("racer-{k}.json"))?;
-        let pf = load_or_new(&format!("racer-portfolio-{k}.json"))?;
+        let pf = crate::ctx::market_key(&format!("racer-portfolio-{k}.json"))?;
         if c.rpc.get_account(&pf.pubkey()).is_err() {
             let tokens = spl_associated_token_account::get_associated_token_address(&racer.pubkey(), &mint);
             let rent = c.rpc.get_minimum_balance_for_rent_exemption(PORTFOLIO_ACCOUNT_LEN)?;
@@ -84,10 +84,7 @@ pub fn race(c: &Ctx, traders: usize, used: usize) -> Result<()> {
     let racers = racers(c, &st, traders)?;
     // the asset to this slot and its holders fresh first, as a keeper leaves them, then the side with the smaller
     // gap, paying it if there is one
-    let refresh = crate::mark::refresh_ixs(c, &st, 12)?;
-    if !refresh.is_empty() {
-        c.send(refresh, &[&c.house])?;
-    }
+    crate::mark::settle(c, &st, 1_000)?;
     let (snap, ctx, mark) = snapshot(c, &st, &racers[0].1)?;
     let long = snap.pool.is_some_and(|p| p.high.saturating_sub(mark) <= mark.saturating_sub(p.low));
     let size_q = if long { SIZE_Q } else { -SIZE_Q };

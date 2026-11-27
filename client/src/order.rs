@@ -8,7 +8,6 @@
 
 use crate::{
     ctx::{pk, read_state, Ctx},
-    mark::crank_ix,
     market::show,
     matcher::{context_key, filled_in, shards, show_context, simulate, trade_ixs, Sim},
 };
@@ -80,11 +79,7 @@ pub fn order(c: &Ctx, contracts: f64, max_fee_bps: u64) -> Result<()> {
     let trader = c.trader.pubkey();
     let portfolio = pk(&st, "traderPortfolio")?;
     let size_q = (contracts * POS_SCALE as f64).round() as i128;
-    let market = pk(&st, "market")?;
 
-    // both portfolios and the mark to this slot first, so the reading below is the one the trade meets
-    let slot = c.rpc.get_slot()?;
-    c.send(vec![crank_ix(c, &trader, market, portfolio, slot), crank_ix(c, &trader, market, pk(&st, "housePortfolio")?, slot)], &[&c.trader])?;
     let (snap, ctx, mark) = snapshot(c, &st, &portfolio)?;
     let free = rules::fill(&snap, &ctx.params(), mark, size_q);
     let (fee, paid_q) = gap_fee(&snap, &ctx, mark, size_q);
@@ -113,12 +108,12 @@ pub fn order(c: &Ctx, contracts: f64, max_fee_bps: u64) -> Result<()> {
 
     // a house portfolio picked at random, and the next one if it has just traded (its position epoch moved) or
     // cannot take the position; a refusal by the rules is the same on every one of them
-    let houses = shards(&st)?;
-    let first = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.subsec_nanos() as usize % houses.len();
+    let all = shards(&st)?;
+    let houses = crate::matcher::shards_for(c, &st, size_q)?;
     let mut last = String::new();
-    for k in 0..houses.len() {
-        let index = (first + k) % houses.len();
-        let ixs = trade_ixs(c, &st, &trader, portfolio, houses[index], size_q, false, pay)?;
+    for house in houses.iter() {
+        let index = all.iter().position(|h| h == house).unwrap_or(0);
+        let ixs = trade_ixs(c, &st, &trader, portfolio, *house, size_q, false, pay)?;
         match simulate(c, &ixs, &c.trader)? {
             Sim::Passed { units, logs } => {
                 let filled = filled_in(&logs).unwrap_or(size_q);
