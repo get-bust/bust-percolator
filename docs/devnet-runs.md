@@ -265,15 +265,66 @@ An update costs about 16,100 compute units, Percolator's `PushAuthMark` included
 25,000 at 1,000 micro-lamports a unit: 5,025 lamports an update, 0.0434 SOL a day for one market at one update every
 10 s. A minute without an update is reported; the average then holds the last price it read.
 
+## The house's rules on chain
+
+Up to here the house co-signed every trade (`TradeNoCpi`), so its quoting rules ran in the client and a trader could
+trade, and close, only while the house was online and willing. `matcher/` moves the rules into a matcher program for
+Percolator's `TradeCpi`, which the trader signs alone. Reading Percolator for it turned up three constraints:
+
+11. **Percolator tells a matcher only the request.** The matcher is called with the size, the mark and some ids, and no
+    account Percolator owns may be passed to it, so it cannot see the trader's position or the market's open interest.
+    The trader's transaction therefore runs the matcher's `Prepare` as the instruction right before `TradeCpi`:
+    `Prepare` reads them and checks through the instructions sysvar that the next instruction is that trade, and the
+    matcher, when called, checks that the instruction running is that trade at the top level and the one before it
+    its `Prepare`. Nothing runs in between, so the snapshot is the state the trade meets.
+12. **The gap cannot be charged through `TradeCpi`.** An unsigned house is charged only the market's base fee, and on
+    an `AuthMark` asset the fee is sized at the mark whatever price the matcher returns. The matcher refuses an open on
+    the side that gains as the mark catches up once the pool is past the gap limit; closing is never refused. An entry
+    wider than the limit needs the house's signature, with the gap as its fee (`TradeNoCpi`, as before).
+13. **Trades against one house portfolio go one at a time.** Every trade advances the house portfolio's position
+    epoch, and a trade names that epoch exactly, so of two trades built against the same epoch the second fails as
+    stale and is sent again. This holds for the co-signed path too. More house portfolios would let trades run side
+    by side.
+
+The matcher was enabled on the house portfolio of the devnet market with an open interest cap of 5% of the pool and a
+1% gap limit. The pool was the CPMM test pool (20M TMEME against SOL), 1.75% above the mark at the time, so longs were
+on the gaining side. Each trade below was signed by the trader alone:
+
+| request | position before | filled | why | compute units |
+|---|---|---|---|---|
+| long 1 | 0 | refused | pool 2.9146 against a mark of 2.8646: past the gap on the gaining side | |
+| short 2 | 0 | short 1.0011, [tx](https://explorer.solana.com/tx/54Lz7mmyrm8VNChnfwfrSXDAtCb4ww7ZxxPaAwKqTzt6jgj4uDMbXbrjryHCZpxEMQXizoUk5AqxmgAzaicS8HVc?cluster=devnet) | the cap: 5% of a pool of 20.02 contracts | 325,986 |
+| long 2 | short 1.0011 | long 1.0011, [tx](https://explorer.solana.com/tx/r5R7ArTb9LNpgP6RnMbRZgjdMitwzCSiZK19B39HWhj2zc2ZApXKFZoAAN6doiSL7qdTk2EphuYQBv6aDA6LDDu?cluster=devnet) | the close in full; the rest would open a long past the gap | 334,573 |
+| short 0.5, with a feed update | 0 | short 0.5, [tx](https://explorer.solana.com/tx/UH3y4PZGB77zMWbhPYM3M6Qmwx29sowkPZFGbmE8VF6nFnV2y6s6VxbNGYR7TjnD1so6epyAXCgT8r8gxUuogXo?cluster=devnet) | | 342,077 |
+| long 0.5, with a feed update | short 0.5 | long 0.5, [tx](https://explorer.solana.com/tx/TDLDKzVBQVEWopAh9gnMjfc6nsrv3p1NKwozHwkWn7QbUKxYLAyD6ipw9MJbrwaDNVNr1MVvfUnVYtc15TwM8L4?cluster=devnet) | a close, with the pool 2.4% above the mark | 430,870 |
+
+With a feed update in the same transaction the trader needs no keeper either: the update pushes a new mark and the
+cranks after it bring both portfolios to it (the other way round, Percolator refuses the trade with
+`EngineLockActive`). A transaction holds the update, two cranks, `Prepare` and `TradeCpi` within 431,000 compute
+units, a third of the limit.
+
+`perc matcher attack` simulates the ways around the snapshot. Each was refused by the matcher:
+
+| attempt | refused with |
+|---|---|
+| `TradeCpi` without `Prepare` | `NotPrepared` |
+| another instruction between `Prepare` and `TradeCpi` | `NotATrade` (in `Prepare`) |
+| two trades after one `Prepare`, the second with the epochs Percolator expects | `NotPrepared` (the second) |
+| `Prepare` on another portfolio than the one that trades | `NotATrade` |
+
+A program that calls `TradeCpi` itself is refused by the same check (the running top-level instruction must be
+Percolator's), but was not tried on chain.
+
 ## Before mainnet
 
 - Done on devnet: open interest per coin capped by the pool's depth, a gap fee and limit, the house as backing provider,
   a 30-minute average, the attack again until it lost money (run 4), and an attacker who held the pump through the
   whole average (run 5).
-- The house's quoting rules move from the client into an on-chain matcher. The average has moved into `mark/` on
-  devnet, SOL pools priced in dollars with Pyth; and Raydium CPMM and AMM v4 pools read, and a keeper calls it;
-  on mainnet the keeper runs on a host of its own, with a second one that anyone can run, since an update is
-  permissionless.
+- The house's quoting rules are on chain on devnet (`matcher/`), and so is the average (`mark/`), SOL pools priced in
+  dollars with Pyth, Raydium CPMM and AMM v4 pools read, and a keeper calls it; on mainnet the keeper runs on a host
+  of its own, with a second one that anyone can run, since an update is permissionless, and a trader can update in
+  its own transaction. Left: the co-signed entry past the gap limit with the gap as its fee, and more than one house
+  portfolio so that trades do not wait for each other (finding 13).
 - A listing floor: only coins whose pools meet a pump with sellers. Run 4's half-life of 120 s and run 5's 150M TMEME
   of holder supply were assumptions. The first mainnet reading (findings 8 and 9) rules out coins hours old; for the
   rest, each coin's pump and fade is measured from its own candles before it is listed, and its open interest cap

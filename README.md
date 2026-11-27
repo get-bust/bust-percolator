@@ -12,6 +12,7 @@ This repository is a devnet trial. It is not deployed on mainnet and holds no re
 |---|---|
 | Devnet | [`7R1ED7LLqoP468afxJfq9HJ5ikqT4z73C6AYoE7evdPo`](https://explorer.solana.com/address/7R1ED7LLqoP468afxJfq9HJ5ikqT4z73C6AYoE7evdPo?cluster=devnet) |
 | Devnet, mark feed (`mark/`) | [`DGCkC4YboRrAxFKY5piEgCE9yjT1tCxwzKeMqZ7NCBfo`](https://explorer.solana.com/address/DGCkC4YboRrAxFKY5piEgCE9yjT1tCxwzKeMqZ7NCBfo?cluster=devnet) |
+| Devnet, matcher (`matcher/`) | [`7XE8mxQ9UxZ397pR5xrVUjKhv4EeSL3VK9idbfae2yCV`](https://explorer.solana.com/address/7XE8mxQ9UxZ397pR5xrVUjKhv4EeSL3VK9idbfae2yCV?cluster=devnet) |
 
 The devnet program is [percolator-prog](https://github.com/aeyakovenko/percolator-prog) at commit
 [`aac89b9`](https://github.com/aeyakovenko/percolator-prog/commit/aac89b9e078696131df2100368d4fd53baec5fac), built
@@ -69,6 +70,31 @@ client/target/release/perc feed init 1800 10 100   # 30-minute average, an updat
 client/target/release/perc feed take               # the feed's PDA takes the oracle role from the house
 client/target/release/perc feed run 10             # call it every 10 s (perc feed release gives the role back)
 client/target/release/perc probe <rpc> <pool> <quote_mint>   # read any cluster's pool with the feed's layouts
+```
+
+## The matcher
+
+`matcher/` holds the house's quoting rules on chain, for Percolator's `TradeCpi`: the trader signs alone, and the house
+takes no part in a trade once it has enabled the matcher on its portfolio. Percolator calls a matcher with only the
+request and keeps its own accounts away from it, so the trader's transaction runs the matcher's `Prepare` right before
+`TradeCpi`. `Prepare` reads the market's open interest, the trader's position (as the engine counts it after ADL) and
+the pool, checks through the instructions sysvar that the next instruction is a `TradeCpi` for that market, trader and
+house portfolio, and leaves what it read in the matcher's context. When Percolator calls the matcher, it checks that
+the running instruction is that `TradeCpi`, at the top level, right after its `Prepare`, and fills by the rules:
+
+- the part of a request that closes the trader's position is always filled;
+- the part that opens is filled only while the pool can be read, while the pool and the mark agree within the gap
+  limit on the side that would gain as the mark catches up, and up to the open interest cap (a share of the pool's
+  coin reserve, valued at the lower of the mark and the pool price). What fits under the cap is a partial fill.
+
+`matcher/src/layout.rs` reads Percolator's accounts at fixed offsets; its tests hold them to Percolator's types and to
+its own readers on devnet accounts.
+
+```sh
+cd matcher && cargo test && cargo-build-sbf && cd ..
+client/target/release/perc matcher init 500 100     # the house: open interest up to 5% of the pool, a 1% gap limit
+client/target/release/perc matcher trade -2         # the trader alone; add `update` for a feed update in the same transaction
+client/target/release/perc matcher attack           # simulate the ways around the snapshot; each is refused
 ```
 
 ## Scripts
