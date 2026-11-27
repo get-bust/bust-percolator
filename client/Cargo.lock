@@ -2562,6 +2562,7 @@ dependencies = [
  "bust-matcher",
  "percolator-prog",
  "serde_json",
+ "solana-account-decoder",
  "solana-client",
  "solana-sdk",
  "spl-associated-token-account 3.0.4",

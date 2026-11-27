@@ -173,9 +173,14 @@ fn read_pool_file(name: &str) -> Result<Value> {
     Ok(serde_json::from_str(&std::fs::read_to_string(crate::ctx::root().join("state").join(name))?)?)
 }
 
-/// An update uses about 16,100 compute units, Percolator's PushAuthMark included; the keeper asks for a little more.
+/// An update uses about 16,100 compute units, Percolator's PushAuthMark included.
+#[allow(dead_code)]
 const UPDATE_UNITS: u32 = 25_000;
-/// A matcher sample with it: 5,642 units on devnet.
+/// Cranks a keeper tick sends at most, of the asset's holders and to keep its accrual at the chain's slot. A market
+/// with more holders than this needs its holders cranked in transactions of their own.
+const MAX_KEEPER_CRANKS: usize = 12;
+/// A matcher sample with it, one per house portfolio: 5,642 units on devnet.
+#[allow(dead_code)]
 const OBSERVE_UNITS: u32 = 8_000;
 
 /// One update: the feed reads the pool, adds an observation and pushes the average.
@@ -187,25 +192,45 @@ pub fn update(c: &Ctx) -> Result<String> {
 /// The keeper: calls the feed every `secs` seconds with a compute budget sized to the update, at `micro_lamports` a
 /// unit. A call refused as too soon is skipped; a stretch of a minute without an update is reported, since the
 /// average then holds the last price and Percolator's staleness rules start to count.
-pub fn run(c: &Ctx, secs: u64, micro_lamports: u64) -> Result<()> {
-    let observes = read_state().is_ok_and(|st| st.get("matcherCtx").is_some());
-    let fee = 5_000 + (UPDATE_UNITS + if observes { OBSERVE_UNITS } else { 0 }) as u64 * micro_lamports / 1_000_000;
-    println!("an update every {secs} s at {fee} lamports: {:.4} SOL a day", fee as f64 * 86_400.0 / secs as f64 / 1e9);
+pub fn run(c: &Ctx, secs: u64, micro_lamports: u64, crank_secs: u64) -> Result<()> {
+    // an update at a whole transaction's budget, and a crank transaction between updates every crank_secs
+    let update_fee = 5_000 + 1_400_000 * micro_lamports / 1_000_000;
+    let crank_fee = 5_000 + crate::mark::CRANK_UNITS as u64 * micro_lamports / 1_000_000;
+    let cranks = secs.saturating_sub(1) / crank_secs.max(1);
+    let per_update = update_fee + cranks * crank_fee;
+    println!(
+        "an update every {secs} s at {update_fee} lamports and {cranks} crank transaction(s) between: {:.4} SOL a day at most",
+        per_update as f64 * 86_400.0 / secs as f64 / 1e9
+    );
     let mut last_ok = std::time::Instant::now();
     loop {
         // the matcher samples the pool in the same transaction, one the trader cannot shape
         let sent = read_state()
             .and_then(|st| {
+                // the new mark; cranks that bring the asset's accrual to the chain's slot, where the price moves to
+                // the new mark (a trade that adds risk is refused while the accrual is behind); then a crank of
+                // every portfolio holding the asset, which the move left stale (it is refused until they are
+                // cranked); then the matcher's samples
                 let mut ixs = vec![update_ix(c, &st)?];
-                if st.get("matcherCtx").is_some() {
-                    ixs.push(crate::matcher::observe_ix(c, &st)?);
+                let slot = c.rpc.get_slot()?;
+                let market = pk(&st, "market")?;
+                let holders = crate::mark::holders(c, &st)?;
+                let mut cranks = crate::mark::catch_up_ixs(c, &st, MAX_KEEPER_CRANKS, 0)?;
+                let room = MAX_KEEPER_CRANKS.saturating_sub(cranks.len());
+                cranks.extend(holders.iter().take(room).map(|h| crate::mark::crank_ix(c, &c.house.pubkey(), market, *h, slot)));
+                if holders.len() > room {
+                    println!("{} portfolios hold the asset; this tick cranks {room}", holders.len());
                 }
-                Ok(ixs)
+                // a holder's crank after a price move settles its profit and loss, which costs more than a plain crank
+                // and is not known beforehand: the update takes a transaction's whole budget
+                let units = 1_400_000;
+                ixs.extend(cranks);
+                if st.get("matcherCtx").is_some() {
+                    ixs.extend(crate::matcher::observe_ixs(c, &st)?);
+                }
+                Ok((ixs, units))
             })
-            .and_then(|ixs| {
-                let units = UPDATE_UNITS + if ixs.len() > 1 { OBSERVE_UNITS } else { 0 };
-                c.send_with_budget(ixs, &[&c.house], units, micro_lamports)
-            });
+            .and_then(|(ixs, units)| c.send_with_budget(ixs, &[&c.house], units, micro_lamports));
         match sent {
             Ok(sig) => {
                 last_ok = std::time::Instant::now();
@@ -214,14 +239,43 @@ pub fn run(c: &Ctx, secs: u64, micro_lamports: u64) -> Result<()> {
             }
             Err(e) => {
                 let why = e.to_string();
-                let why = why.lines().find(|l| l.contains("custom program error") || l.contains("Error")).unwrap_or("?").trim().to_string();
+                // the error comes pretty-printed over many lines: one line, from where the instruction is named
+                let flat = why.split_whitespace().collect::<Vec<_>>().join(" ");
+                let why = flat.find("InstructionError").map_or(flat.as_str(), |i| &flat[i..]).chars().take(90).collect::<String>();
                 println!("update failed: {why}");
                 if last_ok.elapsed() > Duration::from_secs(60) {
                     println!("no update for {} s", last_ok.elapsed().as_secs());
                 }
             }
         }
-        thread::sleep(Duration::from_secs(secs));
+        // between updates, cranks that keep the asset's accrual near the chain's slot, so a trade's own two cranks
+        // reach the slot it lands in
+        let started = std::time::Instant::now();
+        while started.elapsed() + Duration::from_secs(crank_secs) < Duration::from_secs(secs) {
+            thread::sleep(Duration::from_secs(crank_secs));
+            // the price can keep moving toward the mark for a few slots after an update, and each move leaves the
+            // holders stale again: crank them too while it does
+            let cranked = read_state()
+                .and_then(|st| {
+                    if crate::mark::holders_stale(c, &pk(&st, "market")?)? {
+                        crate::mark::refresh_ixs(c, &st, MAX_KEEPER_CRANKS)
+                    } else {
+                        crate::mark::catch_up_ixs(c, &st, MAX_KEEPER_CRANKS, 0)
+                    }
+                })
+                .and_then(|ixs| {
+                let n = ixs.len() as u32;
+                if n == 0 {
+                    return Ok(());
+                }
+                c.send_with_budget(ixs, &[&c.house], (crate::mark::CRANK_UNITS * 2 * n).min(1_400_000), micro_lamports).map(|_| ())
+            });
+            if let Err(e) = cranked {
+                let flat = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
+                println!("crank failed: {}", flat.find("InstructionError").map_or(flat.as_str(), |i| &flat[i..]).chars().take(90).collect::<String>());
+            }
+        }
+        thread::sleep(Duration::from_secs(secs).saturating_sub(started.elapsed()));
     }
 }
 

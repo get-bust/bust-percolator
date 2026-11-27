@@ -131,3 +131,108 @@ pub fn pusher(c: &Ctx, st: &Value, window: u64) -> Result<()> {
         thread::sleep(Duration::from_secs(2));
     }
 }
+
+/// A crank's compute units: 64,683 on devnet for one that moves no price, 83,427 for one that does. How many fit a
+/// transaction.
+pub const CRANK_UNITS: u32 = 90_000;
+const CRANKS_PER_TX: usize = 15;
+
+/// How many slots the asset's accrual is behind the chain, and the most one crank moves it.
+pub fn accrual_lag(c: &Ctx, market: &Pubkey) -> Result<(u64, u64)> {
+    let (_, group) = eng(state::read_market(&c.data(market)?))?;
+    let behind = c.rpc.get_slot()?.saturating_sub(group.assets[0].slot_last);
+    Ok((behind, group.config.max_accrual_dt_slots.max(1)))
+}
+
+/// The portfolios that hold a leg of asset 0: after the mark moves, every one of them has to be cranked before anyone
+/// can add risk to the asset (Percolator counts their positions as stale until then).
+pub fn holders(c: &Ctx, st: &Value) -> Result<Vec<Pubkey>> {
+    use solana_client::{
+        rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
+        rpc_filter::{Memcmp, RpcFilterType},
+    };
+    let market = pk(st, "market")?;
+    let (_, group) = eng(state::read_market(&c.data(&market)?))?;
+    let config = RpcProgramAccountsConfig {
+        filters: Some(vec![
+            RpcFilterType::Memcmp(Memcmp::new_raw_bytes(10, vec![bust_matcher::layout::KIND_PORTFOLIO])),
+            RpcFilterType::Memcmp(Memcmp::new_raw_bytes(bust_matcher::layout::PORTFOLIO_MARKET_OFF, market.to_bytes().to_vec())),
+        ]),
+        account_config: RpcAccountInfoConfig { encoding: Some(solana_account_decoder::UiAccountEncoding::Base64), ..Default::default() },
+        ..Default::default()
+    };
+    let accounts = c.rpc.get_program_accounts_with_config(&c.program, config)?;
+    Ok(accounts
+        .into_iter()
+        .filter(|(_, a)| bust_matcher::layout::holds_leg(&a.data, 0, group.assets[0].market_id))
+        .map(|(k, _)| k)
+        .collect())
+}
+
+/// Cranks enough to bring the asset's accrual to the chain's slot, at most `cap`; `already` cranks the transaction
+/// sends anyway count toward it. None to spare: a crank with no slot left to accrue fails (`EngineNonProgress`) while
+/// the price is still moving toward a new mark.
+pub fn catch_up_ixs(c: &Ctx, st: &Value, cap: usize, already: usize) -> Result<Vec<Instruction>> {
+    let market = pk(st, "market")?;
+    let (behind, dt) = accrual_lag(c, &market)?;
+    let n = (behind.div_ceil(dt) as usize).saturating_sub(already).min(cap);
+    let slot = c.rpc.get_slot()?;
+    let house = pk(st, "housePortfolio")?;
+    // the slot field is not read on chain; varying it keeps identical cranks in one batch apart
+    Ok((0..n as u64).map(|k| crank_ix(c, &c.house.pubkey(), market, house, slot + k)).collect())
+}
+
+/// Brings an asset that was left uncranked back to the chain's slot. Percolator accrues an asset at most
+/// `max_accrual_dt_slots` slots a crank; once the asset has open interest, a trade that adds risk is refused while it
+/// is behind. Sends batches of transactions of 20 cranks without waiting on each, then checks how far it got.
+pub fn catch_up(c: &Ctx, st: &Value) -> Result<()> {
+    use solana_client::rpc_config::RpcSendTransactionConfig;
+    use solana_sdk::{compute_budget::ComputeBudgetInstruction, transaction::Transaction};
+    let market = pk(st, "market")?;
+    let house = pk(st, "housePortfolio")?;
+    let config = RpcSendTransactionConfig { skip_preflight: true, ..Default::default() };
+    let mut nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() << 20;
+    let started = std::time::Instant::now();
+    loop {
+        let (behind, dt) = accrual_lag(c, &market)?;
+        println!("{:>5} s: the asset's accrual is {behind} slots behind ({} cranks)", started.elapsed().as_secs(), behind.div_ceil(dt));
+        if behind <= 2 * dt {
+            return Ok(());
+        }
+        let txs = (behind.div_ceil(dt) as usize).div_ceil(CRANKS_PER_TX).min(48);
+        let blockhash = c.rpc.get_latest_blockhash()?;
+        let mut last = None;
+        for _ in 0..txs {
+            let mut ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(CRANK_UNITS * CRANKS_PER_TX as u32)];
+            for _ in 0..CRANKS_PER_TX {
+                nonce += 1;
+                ixs.push(crank_ix(c, &c.house.pubkey(), market, house, nonce));
+            }
+            let tx = Transaction::new_signed_with_payer(&ixs, Some(&c.house.pubkey()), &[&c.house], blockhash);
+            last = Some(c.rpc.send_transaction_with_config(&tx, config)?);
+        }
+        if let Some(sig) = last {
+            let started = std::time::Instant::now();
+            while !c.rpc.confirm_transaction(&sig).unwrap_or(false) && started.elapsed().as_secs() < 30 {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+    }
+}
+
+/// Whether a crank since the last mark moved the price and left the asset's holders stale.
+pub fn holders_stale(c: &Ctx, market: &Pubkey) -> Result<bool> {
+    let (_, group) = eng(state::read_market(&c.data(market)?))?;
+    let a = &group.assets[0];
+    Ok(a.stale_account_count_long != 0 || a.stale_account_count_short != 0)
+}
+
+/// Cranks that bring the asset to the chain's slot and then every holder, which a price move left stale.
+pub fn refresh_ixs(c: &Ctx, st: &Value, cap: usize) -> Result<Vec<Instruction>> {
+    let market = pk(st, "market")?;
+    let slot = c.rpc.get_slot()?;
+    let mut ixs = catch_up_ixs(c, st, cap, 0)?;
+    let room = cap.saturating_sub(ixs.len());
+    ixs.extend(holders(c, st)?.into_iter().take(room).map(|h| crank_ix(c, &c.house.pubkey(), market, h, slot)));
+    Ok(ixs)
+}
