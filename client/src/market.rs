@@ -9,7 +9,7 @@ use percolator_prog::{
     state,
 };
 use serde_json::{json, Value};
-use solana_sdk::{instruction::AccountMeta, pubkey::Pubkey, signature::Signer, system_instruction};
+use solana_sdk::{instruction::AccountMeta, pubkey::Pubkey, signature::{Keypair, Signer}, system_instruction};
 
 /// Funds the trader starts with in its token account, and what it deposits.
 const TRADER_TOKENS: u64 = 1_000;
@@ -176,6 +176,12 @@ pub fn configure_mark(c: &Ctx, st: &Value, mark: u64) -> Result<()> {
 /// Deposits `amount` collateral atoms into the house's or the trader's portfolio.
 pub fn deposit(c: &Ctx, st: &Value, house: bool, amount: u128) -> Result<()> {
     let (owner, pf) = if house { (&c.house, pk(st, "housePortfolio")?) } else { (&c.trader, pk(st, "traderPortfolio")?) };
+    deposit_into(c, st, owner, &pf, amount)
+}
+
+/// `owner` deposits `amount` collateral atoms from its token account into its portfolio `pf`.
+pub fn deposit_into(c: &Ctx, st: &Value, owner: &Keypair, pf: &Pubkey, amount: u128) -> Result<()> {
+    let pf = *pf;
     let data = c.data(&pf)?;
     let source = spl_associated_token_account::get_associated_token_address(&owner.pubkey(), &pk(st, "mint")?);
     let sig = c.send(

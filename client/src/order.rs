@@ -10,7 +10,7 @@ use crate::{
     ctx::{pk, read_state, Ctx},
     mark::crank_ix,
     market::show,
-    matcher::{context_key, filled_in, show_context, simulate, trade_ixs, Sim},
+    matcher::{context_key, filled_in, shards, show_context, simulate, trade_ixs, Sim},
 };
 use anyhow::{anyhow, Result};
 use bust_mark::Feed;
@@ -111,22 +111,43 @@ pub fn order(c: &Ctx, contracts: f64, max_fee_bps: u64) -> Result<()> {
         }
     }
 
-    let ixs = trade_ixs(c, &st, &trader, portfolio, size_q, false, pay)?;
-    match simulate(c, &ixs, &c.trader)? {
-        Sim::Passed { units, logs } => {
-            let filled = filled_in(&logs).unwrap_or(size_q);
-            let limit = (units * 6 / 5).min(1_400_000) as u32;
-            let sig = c.send_with_budget(ixs, &[&c.trader], limit, 1_000)?;
-            println!(
-                "filled {} of {contracts} contracts{}, signed by the trader alone: {sig}",
-                filled as f64 / POS_SCALE as f64,
-                if pay > 0 { format!(", {:.6} USDC paid for the gap", pay as f64 / 1e6) } else { String::new() }
-            );
+    // a house portfolio picked at random, and the next one if it has just traded (its position epoch moved) or
+    // cannot take the position; a refusal by the rules is the same on every one of them
+    let houses = shards(&st)?;
+    let first = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.subsec_nanos() as usize % houses.len();
+    let mut last = String::new();
+    for k in 0..houses.len() {
+        let index = (first + k) % houses.len();
+        let ixs = trade_ixs(c, &st, &trader, portfolio, houses[index], size_q, false, pay)?;
+        match simulate(c, &ixs, &c.trader)? {
+            Sim::Passed { units, logs } => {
+                let filled = filled_in(&logs).unwrap_or(size_q);
+                let limit = (units * 6 / 5).min(1_400_000) as u32;
+                match c.send_with_budget(ixs, &[&c.trader], limit, 1_000) {
+                    Ok(sig) => {
+                        println!(
+                            "filled {} of {contracts} contracts against house portfolio {index}{}, signed by the trader alone: {sig}",
+                            filled as f64 / POS_SCALE as f64,
+                            if pay > 0 { format!(", {:.6} USDC paid for the gap", pay as f64 / 1e6) } else { String::new() }
+                        );
+                        last.clear();
+                        break;
+                    }
+                    Err(e) => last = e.to_string().lines().next().unwrap_or("").to_string(),
+                }
+            }
+            Sim::Failed { error, logs } => {
+                if let Some(why) = logs.iter().find(|l| l.contains("refused")) {
+                    println!("not sent: {why}");
+                    last.clear();
+                    break;
+                }
+                last = error;
+            }
         }
-        Sim::Failed { error, logs } => {
-            let why = logs.iter().find(|l| l.contains("refused")).cloned().unwrap_or(error);
-            println!("not sent: {why}");
-        }
+    }
+    if !last.is_empty() {
+        println!("no house portfolio took it: {last}");
     }
     show_context(c)?;
     show(c)

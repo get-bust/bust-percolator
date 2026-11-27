@@ -5,9 +5,14 @@
 //! portfolio in Percolator (`SetMatcherConfig`). After that, the house does not take part in a trade, not even one
 //! that pays the gap: that is a token transfer from the trader to the house's fee account in the same transaction.
 //! The keeper samples the pool into the context (`Observe`) with every feed update.
+//!
+//! Every trade advances the house portfolio's position epoch and names it exactly, so trades against one house
+//! portfolio go one at a time. The house therefore keeps several portfolios ("shards"), each with a context of its
+//! own; an order goes to one of them, and to the next if that one has just traded. The open interest cap is read
+//! from the market, so it holds across all of them.
 
 use crate::{
-    ctx::{eng, pk, read_state, write_state, Ctx},
+    ctx::{eng, load_or_new, pk, read_state, write_state, Ctx},
     feed,
     mark::crank_ix,
     market::show,
@@ -22,7 +27,7 @@ use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-    system_program, sysvar,
+    system_instruction, system_program, sysvar,
     transaction::Transaction,
 };
 
@@ -30,6 +35,8 @@ use solana_sdk::{
 const POS_SCALE: f64 = 1_000_000.0;
 /// The most the house lets Percolator charge it per trade through the matcher, in basis points.
 const TRADE_FEE_CAP_BPS: u16 = 100;
+/// Cranks a trade adds at most to bring the asset's accrual to its slot, beyond its two own.
+const MAX_TRADE_CATCH_UP: usize = 6;
 
 fn matcher_ix(tag: u8, fields: &[&[u8]], accounts: Vec<AccountMeta>) -> Instruction {
     let mut data = vec![tag];
@@ -49,58 +56,108 @@ pub fn fee_account(c: &Ctx) -> Pubkey {
     spl_associated_token_account::get_associated_token_address(&c.house.pubkey(), &c.collateral)
 }
 
+/// The house portfolios: the first one the market was set up with, then the shards added to it.
+pub fn shards(st: &Value) -> Result<Vec<Pubkey>> {
+    let mut all = vec![pk(st, "housePortfolio")?];
+    for v in st["houseShards"].as_array().into_iter().flatten() {
+        all.push(v.as_str().unwrap_or_default().parse()?);
+    }
+    Ok(all)
+}
+
+/// The context of the first house portfolio, whose settings every shard copies.
 pub fn context_key(c: &Ctx, st: &Value) -> Result<Pubkey> {
     Ok(context_address(&pk(st, "market")?, &pk(st, "housePortfolio")?, &c.house.pubkey()).0)
 }
 
-/// Opens the matcher's context for the house portfolio and enables the matcher on it in Percolator, with no expiry. A
-/// context of an earlier layout is closed and opened again at the same address, which Percolator's grant names.
-pub fn init(c: &Ctx, oi_cap_bps: u64, max_gap_bps: u64, paid_max_gap_bps: u64, window_secs: u64) -> Result<()> {
-    let mut st = read_state()?;
-    let (market, house) = (pk(&st, "market")?, pk(&st, "housePortfolio")?);
-    let ctx = context_key(c, &st)?;
-    let delegate = delegate_address(&c.program, &market, &house, &c.house.pubkey(), &ctx);
-    let feed = feed_address(&market, 0).0;
+pub fn context_of(c: &Ctx, st: &Value, house: &Pubkey) -> Result<Pubkey> {
+    Ok(context_address(&pk(st, "market")?, house, &c.house.pubkey()).0)
+}
+
+/// Opens the matcher's context for a house portfolio; a context of an earlier layout is closed and opened again at
+/// the same address, which Percolator's grant names.
+fn open_context(c: &Ctx, st: &Value, house: &Pubkey, settings_data: &[u8]) -> Result<()> {
+    let market = pk(st, "market")?;
+    let ctx = context_of(c, st, house)?;
     let current = c.rpc.get_account(&ctx).ok();
-    if current.as_ref().is_some_and(|a| Context::load(&a.data).is_err()) {
+    let stale = current.as_ref().is_some_and(|a| Context::load(&a.data).is_err());
+    if stale {
         let close = matcher_ix(TAG_CLOSE, &[], vec![AccountMeta::new(c.house.pubkey(), true), AccountMeta::new(ctx, false)]);
         println!("closed a context of an earlier layout: {}", c.send(vec![close], &[&c.house])?);
     }
-    if current.is_none() || current.is_some_and(|a| Context::load(&a.data).is_err()) {
+    if current.is_none() || stale {
         let open = matcher_ix(
             TAG_INIT,
-            &[&0u16.to_le_bytes(), &settings(oi_cap_bps, max_gap_bps, paid_max_gap_bps, window_secs)],
+            &[&0u16.to_le_bytes(), settings_data],
             vec![
                 AccountMeta::new(c.house.pubkey(), true),
                 AccountMeta::new(ctx, false),
                 AccountMeta::new_readonly(market, false),
-                AccountMeta::new_readonly(house, false),
+                AccountMeta::new_readonly(*house, false),
                 AccountMeta::new_readonly(c.program, false),
-                AccountMeta::new_readonly(feed, false),
+                AccountMeta::new_readonly(feed_address(&market, 0).0, false),
                 AccountMeta::new_readonly(fee_account(c), false),
                 // the keeper samples the pool with the house's key on devnet; on mainnet a key of its own
                 AccountMeta::new_readonly(c.house.pubkey(), false),
                 AccountMeta::new_readonly(system_program::ID, false),
             ],
         );
-        println!("context {ctx}: {}", c.send(vec![open], &[&c.house])?);
+        println!("context {ctx} for {house}: {}", c.send(vec![open], &[&c.house])?);
     }
+    let hd = c.data(house)?;
+    let enable = enable_ix(c, st, house, eng(state::read_portfolio_position_epoch(&hd))?, eng(state::read_portfolio_matcher_sequence(&hd))?)?;
+    println!("matcher enabled on {house}: {}", c.send(vec![enable], &[&c.house])?);
+    Ok(())
+}
 
-    let hd = c.data(&house)?;
-    let enable = enable_ix(c, &st, eng(state::read_portfolio_position_epoch(&hd))?, eng(state::read_portfolio_matcher_sequence(&hd))?)?;
-    println!("matcher enabled on the house portfolio: {}", c.send(vec![enable], &[&c.house])?);
-    st["matcherCtx"] = ctx.to_string().into();
-    st["matcherDelegate"] = delegate.to_string().into();
+/// Opens the matcher's context for the first house portfolio and enables the matcher on it in Percolator, with no
+/// expiry.
+pub fn init(c: &Ctx, oi_cap_bps: u64, max_gap_bps: u64, paid_max_gap_bps: u64, window_secs: u64) -> Result<()> {
+    let mut st = read_state()?;
+    let house = pk(&st, "housePortfolio")?;
+    open_context(c, &st, &house, &settings(oi_cap_bps, max_gap_bps, paid_max_gap_bps, window_secs))?;
+    st["matcherCtx"] = context_key(c, &st)?.to_string().into();
     write_state(&st)?;
+    show_context(c)
+}
+
+/// Adds `n` house portfolios, each funded with `usdc` and given a context with the first one's settings.
+pub fn add_shards(c: &Ctx, n: usize, usdc: u64) -> Result<()> {
+    let mut st = read_state()?;
+    let first = Context::load(&c.data(&context_key(c, &st)?)?)?;
+    let data = settings(first.oi_cap_bps, first.max_gap_bps, first.paid_max_gap_bps, first.window_secs);
+    let (market, mint) = (pk(&st, "market")?, pk(&st, "mint")?);
+    let rent = c.rpc.get_minimum_balance_for_rent_exemption(percolator_prog::constants::PORTFOLIO_ACCOUNT_LEN)?;
+    for _ in 0..n {
+        let index = shards(&st)?.len();
+        let pf = load_or_new(&format!("house-portfolio-{index}.json"))?;
+        let tokens = spl_associated_token_account::get_associated_token_address(&c.house.pubkey(), &mint);
+        let sig = c.send(
+            vec![
+                spl_token::instruction::mint_to(&spl_token::ID, &mint, &tokens, &c.mint_authority.pubkey(), &[], usdc * 1_000_000)?,
+                system_instruction::create_account(&c.house.pubkey(), &pf.pubkey(), rent, percolator_prog::constants::PORTFOLIO_ACCOUNT_LEN as u64, &c.program),
+                c.prog(Ix::InitPortfolio, vec![AccountMeta::new(c.house.pubkey(), true), AccountMeta::new(market, false), AccountMeta::new(pf.pubkey(), false)]),
+            ],
+            &[&c.house, &c.mint_authority, &pf],
+        )?;
+        println!("house portfolio {index}: {} ({sig})", pf.pubkey());
+        let mut list = st["houseShards"].as_array().cloned().unwrap_or_default();
+        list.push(pf.pubkey().to_string().into());
+        st["houseShards"] = list.into();
+        write_state(&st)?;
+        crate::market::deposit_into(c, &st, &c.house, &pf.pubkey(), usdc as u128 * 1_000_000)?;
+        open_context(c, &st, &pf.pubkey(), &data)?;
+    }
     show_context(c)
 }
 
 /// Enables the matcher on the house portfolio, with no expiry, for the portfolio at `position_epoch` and
 /// `expected_sequence`. Percolator revokes it whenever the portfolio's position changes outside the matcher (a trade
 /// the house signs, a liquidation), so a trade the house signs carries this right after it.
-pub fn enable_ix(c: &Ctx, st: &Value, position_epoch: u64, expected_sequence: u64) -> Result<Instruction> {
-    let (market, house) = (pk(st, "market")?, pk(st, "housePortfolio")?);
-    let ctx = context_key(c, st)?;
+pub fn enable_ix(c: &Ctx, st: &Value, house: &Pubkey, position_epoch: u64, expected_sequence: u64) -> Result<Instruction> {
+    let market = pk(st, "market")?;
+    let house = *house;
+    let ctx = context_of(c, st, &house)?;
     let (_, frontier) = eng(state::read_asset_lifecycle_generation_preflight(&c.data(&market)?, 0, true))?;
     Ok(c.prog(
         Ix::SetMatcherConfig {
@@ -123,21 +180,26 @@ pub fn enable_ix(c: &Ctx, st: &Value, position_epoch: u64, expected_sequence: u6
     ))
 }
 
-/// Changes the house's rules.
+/// Changes the house's rules, on every house portfolio's context.
 pub fn params(c: &Ctx, oi_cap_bps: u64, max_gap_bps: u64, paid_max_gap_bps: u64, window_secs: u64) -> Result<()> {
     let st = read_state()?;
-    let ixn = matcher_ix(
-        TAG_SET_PARAMS,
-        &[&settings(oi_cap_bps, max_gap_bps, paid_max_gap_bps, window_secs)],
-        vec![
-            AccountMeta::new_readonly(c.house.pubkey(), true),
-            AccountMeta::new(context_key(c, &st)?, false),
-            AccountMeta::new_readonly(feed_address(&pk(&st, "market")?, 0).0, false),
-            AccountMeta::new_readonly(fee_account(c), false),
-            AccountMeta::new_readonly(c.house.pubkey(), false),
-        ],
-    );
-    println!("{}", c.send(vec![ixn], &[&c.house])?);
+    let ixs = shards(&st)?
+        .iter()
+        .map(|house| -> Result<Instruction> {
+            Ok(matcher_ix(
+                TAG_SET_PARAMS,
+                &[&settings(oi_cap_bps, max_gap_bps, paid_max_gap_bps, window_secs)],
+                vec![
+                    AccountMeta::new_readonly(c.house.pubkey(), true),
+                    AccountMeta::new(context_of(c, &st, house)?, false),
+                    AccountMeta::new_readonly(feed_address(&pk(&st, "market")?, 0).0, false),
+                    AccountMeta::new_readonly(fee_account(c), false),
+                    AccountMeta::new_readonly(c.house.pubkey(), false),
+                ],
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    println!("{}", c.send(ixs, &[&c.house])?);
     show_context(c)
 }
 
@@ -154,9 +216,14 @@ fn pool_metas(feed: &Feed) -> Vec<AccountMeta> {
     metas
 }
 
-/// The keeper samples the pool into the context, signed by the context's observer (the house's key on devnet).
-pub fn observe_ix(c: &Ctx, st: &Value) -> Result<Instruction> {
-    let ctx_key = context_key(c, st)?;
+/// The keeper samples the pool into every house portfolio's context, signed by the observer (the house's key on
+/// devnet).
+pub fn observe_ixs(c: &Ctx, st: &Value) -> Result<Vec<Instruction>> {
+    shards(st)?.iter().map(|house| observe_ix(c, st, house)).collect()
+}
+
+fn observe_ix(c: &Ctx, st: &Value, house: &Pubkey) -> Result<Instruction> {
+    let ctx_key = context_of(c, st, house)?;
     let ctx = Context::load(&c.data(&ctx_key)?)?;
     let feed = Feed::load(&c.data(&ctx.feed)?)?;
     let mut metas = vec![AccountMeta::new_readonly(ctx.observer, true), AccountMeta::new(ctx_key, false), AccountMeta::new_readonly(ctx.feed, false)];
@@ -164,12 +231,13 @@ pub fn observe_ix(c: &Ctx, st: &Value) -> Result<Instruction> {
     Ok(matcher_ix(TAG_OBSERVE, &[], metas))
 }
 
-/// The instructions of one matcher trade, signed by `trader` alone: an optional feed update, cranks of both
-/// portfolios to this slot, the gap's fee as a transfer to the house when `fee` is not zero, `Prepare`, and `TradeCpi`.
-pub fn trade_ixs(c: &Ctx, st: &Value, trader: &Pubkey, trader_portfolio: Pubkey, size_q: i128, with_update: bool, fee: u64) -> Result<Vec<Instruction>> {
+/// The instructions of one matcher trade against the house portfolio `house`, signed by `trader` alone: an optional
+/// feed update, cranks of both portfolios to this slot, the gap's fee as a transfer to the house when `fee` is not
+/// zero, `Prepare`, and `TradeCpi`.
+#[allow(clippy::too_many_arguments)]
+pub fn trade_ixs(c: &Ctx, st: &Value, trader: &Pubkey, trader_portfolio: Pubkey, house: Pubkey, size_q: i128, with_update: bool, fee: u64) -> Result<Vec<Instruction>> {
     let market = pk(st, "market")?;
-    let house = pk(st, "housePortfolio")?;
-    let ctx_key = context_key(c, st)?;
+    let ctx_key = context_of(c, st, &house)?;
     let ctx = Context::load(&c.data(&ctx_key)?)?;
     let feed = Feed::load(&c.data(&ctx.feed)?)?;
     // a new mark first, then the cranks that bring both portfolios to it
@@ -180,6 +248,13 @@ pub fn trade_ixs(c: &Ctx, st: &Value, trader: &Pubkey, trader_portfolio: Pubkey,
     let slot = c.rpc.get_slot()?;
     ixs.push(crank_ix(c, trader, market, trader_portfolio, slot));
     ixs.push(crank_ix(c, trader, market, house, slot));
+    // the asset's accrual must reach the slot the trade lands in, and a crank moves it at most max_accrual_dt_slots:
+    // the keeper keeps it close, so the two cranks above usually do; only a wider lag adds cranks, none to spare
+    for extra in crate::mark::catch_up_ixs(c, st, MAX_TRADE_CATCH_UP, 2)? {
+        let mut extra = extra;
+        extra.accounts[0] = AccountMeta::new(*trader, true);
+        ixs.push(extra);
+    }
 
     if fee > 0 {
         // the instruction right before Prepare: Prepare reads what it paid
@@ -268,7 +343,7 @@ fn simulate_or_bail(c: &Ctx, ixs: &[Instruction], payer: &Keypair) -> Result<u64
 pub fn trade(c: &Ctx, contracts: f64, with_update: bool) -> Result<()> {
     let st = read_state()?;
     let size_q = (contracts * POS_SCALE).round() as i128;
-    let ixs = trade_ixs(c, &st, &c.trader.pubkey(), pk(&st, "traderPortfolio")?, size_q, with_update, 0)?;
+    let ixs = trade_ixs(c, &st, &c.trader.pubkey(), pk(&st, "traderPortfolio")?, pk(&st, "housePortfolio")?, size_q, with_update, 0)?;
     // the limit is what a simulation used and a fifth more: a close that settles costs more than an open
     let units = simulate_or_bail(c, &ixs, &c.trader)?;
     let limit = (units * 6 / 5).min(1_400_000) as u32;
@@ -289,7 +364,7 @@ pub fn attack(c: &Ctx) -> Result<()> {
     let size_q: i128 = if long { 100_000 } else { -100_000 };
     let (fee, _) = crate::order::gap_fee(&snap, &ctx, mark, size_q);
     println!("an order of {} contract, the gap's fee {:.6} USDC", size_q as f64 / POS_SCALE, fee as f64 / 1e6);
-    let honest = trade_ixs(c, &st, &trader, portfolio, size_q, false, fee)?;
+    let honest = trade_ixs(c, &st, &trader, portfolio, pk(&st, "housePortfolio")?, size_q, false, fee)?;
     let (prep, trade) = (honest.len() - 2, honest.len() - 1);
     let mut cases: Vec<(&str, Vec<Instruction>)> = Vec::new();
 
@@ -371,8 +446,22 @@ pub fn show_context(c: &Ctx) -> Result<()> {
         ctx.snap_oi_short_q as f64 / POS_SCALE,
         ctx.snap_fee_paid as f64 / 1e6,
     );
-    let hd = c.data(&pk(&st, "housePortfolio")?)?;
-    let cfg = eng(state::read_portfolio_matcher_config(&hd))?;
-    println!("  house portfolio matcher config: program {} context {}", Pubkey::new_from_array(cfg.matcher_program), Pubkey::new_from_array(cfg.matcher_context));
+    let (_, group) = eng(state::read_market(&c.data(&pk(&st, "market")?)?))?;
+    let market_id = group.assets[0].market_id;
+    for (i, house) in shards(&st)?.iter().enumerate() {
+        let hd = c.data(house)?;
+        let cfg = eng(state::read_portfolio_matcher_config(&hd))?;
+        let pf = eng(state::read_portfolio(&hd))?;
+        let position = pf.legs.iter().find(|l| l.active == 1 && l.market_id.get() == market_id).map_or(0.0, |l| {
+            let q = l.basis_pos_q.get().unsigned_abs() as f64 / POS_SCALE;
+            if l.side == 0 { q } else { -q }
+        });
+        let enabled = Pubkey::new_from_array(cfg.matcher_context) == context_of(c, &st, house)?;
+        println!(
+            "  house portfolio {i} {house}: capital {:.2} position {position:.4}, matcher {}",
+            pf.capital.get() as f64 / 1e6,
+            if enabled { "set" } else { "NOT SET" }
+        );
+    }
     Ok(())
 }

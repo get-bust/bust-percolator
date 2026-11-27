@@ -11,6 +11,8 @@
 //!   perc renew                      move each side's backing to a far expiry (only with no claims on it)
 //!   perc push <mark_e6>             push one authority mark
 //!   perc crank <trader|house|key>   permissionless crank of one portfolio (key: a portfolio in the state file)
+//!   perc catch-up                   crank an asset left uncranked back to the chain's slot
+//!   perc holders                    the portfolios holding the asset, which the keeper cranks after each mark
 //!   perc trade <contracts>          the trader against the house at the effective mark (positive: long), both
 //!                                   signing, priced against state/pool.json: the path the recorded runs use
 //!   perc withdraw <usdc>            the trader withdraws collateral
@@ -24,16 +26,21 @@
 //!   perc feed close                 close the feed, its rent back to the house
 //!   perc feed take | release        the feed takes the oracle role from the house, or gives it back
 //!   perc feed update                one feed update
-//!   perc feed run <secs> [micro_lamports]
+//!   perc feed run <secs> [micro_lamports] [crank_secs]
 //!                                   the keeper: an update every <secs> seconds, priced at [micro_lamports] a
-//!                                   compute unit (default 1,000), with a matcher sample when there is a matcher
+//!                                   compute unit (default 1,000), with cranks of the asset's holders and a matcher
+//!                                   sample, and cranks every [crank_secs] (default 3) between updates
 //!   perc feed show                  the feed and the asset's mark target
 //!   perc matcher init <oi_cap_bps> <max_gap_bps> <paid_max_gap_bps> <window_secs>
 //!                                   open the on-chain matcher's context for the house portfolio and enable it there
 //!                                   (open interest cap, the gap left free, the widest gap sold, the sample window)
 //!   perc matcher params <oi_cap_bps> <max_gap_bps> <paid_max_gap_bps> <window_secs>
 //!                                   change the house's rules
-//!   perc matcher observe            sample the pool into the context (the keeper does it with each update)
+//!   perc matcher observe            sample the pool into every context (the keeper does it with each update)
+//!   perc matcher shards <n> <usdc>  add n house portfolios, each funded with <usdc> and given the matcher
+//!   perc matcher race <traders> <shards>
+//!                                   that many traders open and then close at once, spread over that many house
+//!                                   portfolios: how many go through
 //!   perc matcher trade <contracts> [update]
 //!                                   the trader trades through the matcher, signing alone ([update]: a feed update
 //!                                   first, in the same transaction)
@@ -56,6 +63,7 @@ mod market;
 mod mark;
 mod matcher;
 mod order;
+mod race;
 mod trade;
 mod record;
 
@@ -90,6 +98,13 @@ fn main() -> Result<()> {
             println!("{}", mark::push(&c, &read_state()?, arg(1)?.parse()?)?);
             market::show(&c)
         }
+        Some("catch-up") => mark::catch_up(&c, &read_state()?),
+        Some("holders") => {
+            for h in mark::holders(&c, &read_state()?)? {
+                println!("{h}");
+            }
+            Ok(())
+        }
         Some("crank") => {
             println!("{}", mark::crank(&c, &read_state()?, &arg(1)?)?);
             market::show(&c)
@@ -107,7 +122,7 @@ fn main() -> Result<()> {
                 println!("{}", feed::update(&c)?);
                 feed::show(&c)
             }
-            "run" => feed::run(&c, arg(2)?.parse()?, arg(3).map(|a| a.parse()).unwrap_or(Ok(1_000))?),
+            "run" => feed::run(&c, arg(2)?.parse()?, arg(3).map(|a| a.parse()).unwrap_or(Ok(1_000))?, arg(4).map(|a| a.parse()).unwrap_or(Ok(3))?),
             "show" => feed::show(&c),
             _ => bail!("feed: init | take | release | close | update | run | show"),
         },
@@ -116,13 +131,15 @@ fn main() -> Result<()> {
             "params" => matcher::params(&c, arg(2)?.parse()?, arg(3)?.parse()?, arg(4)?.parse()?, arg(5)?.parse()?),
             "observe" => {
                 let st = read_state()?;
-                println!("{}", c.send(vec![matcher::observe_ix(&c, &st)?], &[&c.house])?);
+                println!("{}", c.send(matcher::observe_ixs(&c, &st)?, &[&c.house])?);
                 matcher::show_context(&c)
             }
+            "shards" => matcher::add_shards(&c, arg(2)?.parse()?, arg(3)?.parse()?),
+            "race" => race::race(&c, arg(2)?.parse()?, arg(3)?.parse()?),
             "trade" => matcher::trade(&c, arg(2)?.parse()?, arg(3).is_ok_and(|a| a == "update")),
             "show" => matcher::show_context(&c),
             "attack" => matcher::attack(&c),
-            _ => bail!("matcher: init | params | observe | trade | show | attack"),
+            _ => bail!("matcher: init | params | observe | shards | trade | race | show | attack"),
         },
         Some("order") => order::order(&c, arg(1)?.parse()?, arg(2).map(|a| a.parse()).unwrap_or(Ok(0))?),
         Some("record") => record::record(&c, &read_state()?, arg(1)?.parse()?, arg(2)?.parse()?),

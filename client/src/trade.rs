@@ -119,7 +119,7 @@ pub fn trade(c: &Ctx, st: &Value, contracts: f64) -> Result<()> {
     // a trade the house signs revokes the matcher on its portfolio: enable it again in the same transaction
     let mut trade_ixs = trade_ixs;
     if st.get("matcherCtx").is_some() {
-        trade_ixs.push(enable_ix(c, st, eng(state::read_portfolio_position_epoch(&hd))? + 1, eng(state::read_portfolio_matcher_sequence(&hd))?)?);
+        trade_ixs.push(enable_ix(c, st, &hp, eng(state::read_portfolio_position_epoch(&hd))? + 1, eng(state::read_portfolio_matcher_sequence(&hd))?)?);
     }
     let signers = [&c.house, &c.trader];
     let sig = if position_q != 0 && position_q + size_q == 0 {
